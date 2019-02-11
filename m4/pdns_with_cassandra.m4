@@ -1,4 +1,4 @@
-AC_DEFUN([PDNS_WITH_CASSANDRA],[
+AC_DEFUN([PDNS_CHECK_CASSANDRA],[
   AC_ARG_WITH([cassandra],
     [AS_HELP_STRING([--with-cassandra=<path>], [root directory path of Cassandra installation])],
     [
@@ -29,7 +29,7 @@ AC_DEFUN([PDNS_WITH_CASSANDRA],[
     CASSANDRA_libdir=
     for m in $CASSANDRA_LIBS_check; do
       if test -d "$m" && \
-        (test -f "$m/libcassandra.so" || test -f "$m/libcassandra_static.a")
+        (test -f "$m/libcassandra.so" || test -f "$m/libcassandra_static.a" || test -f "$m/libcassandra.dylib")
       then
         CASSANDRA_libdir=$m
         break

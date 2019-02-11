@@ -219,6 +219,9 @@ for a in $modules $dynmodules; do
       PDNS_CHECK_LMDB
       BOOST_SERIALIZATION
       ;;
+    cassandra)
+      PDNS_CHECK_CASSANDRA
+      ;;
   esac
 done
 
@@ -242,6 +245,8 @@ PDNS_WITH_LUA_RECORDS
 AM_CONDITIONAL([ORACLE], [test "x$needoracle" = "xyes"])
 
 AM_CONDITIONAL([LDAP], [test "x$needldap" = "xyes"])
+
+AM_CONDITIONAL([CASSANDRA],[test "x$needcassandra" = "xyes"])
 
 PDNS_CHECK_SQLITE3
 AM_CONDITIONAL([SQLITE3], [test "x$needsqlite3" = "xyes"])
@@ -335,6 +340,7 @@ AC_CONFIG_FILES([
   modules/randombackend/Makefile
   modules/remotebackend/Makefile
   modules/tinydnsbackend/Makefile
+  modules/cassandrabackend/Makefile
 ])
 AC_OUTPUT
 

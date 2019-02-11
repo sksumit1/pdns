@@ -8,18 +8,11 @@
 #include "iputils.hh"
 #include "nameserver.hh"
 #include "statbag.hh"
-#include "arguments.hh"
 #include <utility>
 
 extern vector<ComboAddress> g_localaddresses;
 
-ArgvMap &arg()
-{
-  static ArgvMap theArg;
-  return theArg;
-}
-
-BOOST_AUTO_TEST_SUITE(nameserver_cc)
+BOOST_AUTO_TEST_SUITE(test_nameserver_cc)
 
 BOOST_AUTO_TEST_CASE(test_AddressIsUs4) {
   ComboAddress local1("127.0.0.1", 53);
@@ -50,7 +43,7 @@ BOOST_AUTO_TEST_CASE(test_AddressIsUs6) {
   
   BOOST_CHECK_EQUAL(AddressIsUs(local1), true);
 //  BOOST_CHECK_EQUAL(AddressIsUs(local2), false);
-  BOOST_CHECK_EQUAL(AddressIsUs(local3), true);
+  if(!getenv("PDNS_TEST_NO_IPV6")) BOOST_CHECK_EQUAL(AddressIsUs(local3), true);
   BOOST_CHECK_EQUAL(AddressIsUs(Remote), false);
   Remote.sin4.sin_port = 1;
   BOOST_CHECK_EQUAL(AddressIsUs(Remote), false);

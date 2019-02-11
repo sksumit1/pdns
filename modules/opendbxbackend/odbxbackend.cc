@@ -1,3 +1,25 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ * originally authored by Norbert Sendetzky
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -20,18 +42,6 @@ inline string& strbind( const string& search, const string& replace, string& sub
 
 
 
-inline string& toLowerByRef( string& str )
-{
-        for( unsigned int i = 0; i < str.length(); i++ )
-        {
-        	str[i] = dns_tolower( str[i] );
-        }
-
-        return str;
-}
-
-
-
 OdbxBackend::OdbxBackend( const string& suffix )
 {
         vector<string> hosts;
@@ -50,7 +60,7 @@ OdbxBackend::OdbxBackend( const string& suffix )
 
         	if( getArg( "host" ).size() > 0 )
         	{
-        		L.log( m_myname + " WARNING: Using deprecated opendbx-host parameter", Logger::Warning );
+        		g_log.log( m_myname + " WARNING: Using deprecated opendbx-host parameter", Logger::Warning );
         		stringtok( m_hosts[READ], getArg( "host" ), ", " );
         		m_hosts[WRITE] = m_hosts[READ];
         	}
@@ -65,7 +75,7 @@ OdbxBackend::OdbxBackend( const string& suffix )
         }
         catch( std::exception& e )
         {
-        	L.log( m_myname + " OdbxBackend(): Caught STL exception - " + e.what(),  Logger::Error );
+        	g_log.log( m_myname + " OdbxBackend(): Caught STL exception - " + e.what(),  Logger::Error );
         	throw( PDNSException( "Fatal: STL exception" ) );
         }
 }
@@ -83,17 +93,17 @@ OdbxBackend::~OdbxBackend()
 
 
 
-bool OdbxBackend::getDomainInfo( const string& domain, DomainInfo& di )
+bool OdbxBackend::getDomainInfo( const DNSName& domain, DomainInfo& di, bool getSerial )
 {
         const char* tmp;
 
 
         try
         {
-        	DLOG( L.log( m_myname + " getDomainInfo()", Logger::Debug ) );
+        	DLOG( g_log.log( m_myname + " getDomainInfo()", Logger::Debug ) );
 
         	string stmt = getArg( "sql-zoneinfo" );
-        	string& stmtref = strbind( ":name", escape( toLower( domain ), READ ), stmt );
+        	string& stmtref = strbind( ":name", escape( domain.makeLowerCase().toStringRootDot(), READ ), stmt );
 
         	if( !execStmt( stmtref.c_str(), stmtref.size(), READ ) ) { return false; }
         	if( !getRecord( READ ) ) { return false; }
@@ -109,7 +119,7 @@ bool OdbxBackend::getDomainInfo( const string& domain, DomainInfo& di )
         		di.backend = this;
         		di.serial = 0;
 
-        		if( ( tmp = odbx_field_value( m_result, 6 ) ) != NULL )
+        		if( getSerial && ( tmp = odbx_field_value( m_result, 6 ) ) != NULL )
         		{
         			SOAData sd;
 
@@ -131,7 +141,12 @@ bool OdbxBackend::getDomainInfo( const string& domain, DomainInfo& di )
 
         		if( ( tmp = odbx_field_value( m_result, 3 ) ) != NULL )
         		{
-        			stringtok(di.masters, string( tmp, odbx_field_length( m_result, 3 ) ), ", \t");
+        			vector<string> masters;
+        			stringtok(masters, string( tmp, odbx_field_length( m_result, 3 ) ), ", \t");
+        			for(const auto& m : masters)
+        			{
+        				di.masters.emplace_back(m, 53);
+        			}
         		}
 
         		if( ( tmp = odbx_field_value( m_result, 2 ) ) != NULL )
@@ -148,7 +163,7 @@ bool OdbxBackend::getDomainInfo( const string& domain, DomainInfo& di )
 
         		if( ( tmp = odbx_field_value( m_result, 1 ) ) != NULL )
         		{
-			        di.zone = DNSName(string( tmp, odbx_field_length( m_result, 1 ) ));
+        			di.zone = DNSName(string( tmp, odbx_field_length( m_result, 1 ) ));
         		}
 
         		if( ( tmp = odbx_field_value( m_result, 0 ) ) != NULL )
@@ -160,7 +175,7 @@ bool OdbxBackend::getDomainInfo( const string& domain, DomainInfo& di )
         }
         catch( std::exception& e )
         {
-        	L.log( m_myname + " getDomainInfo: Caught STL std::exception - " + e.what(),  Logger::Error );
+        	g_log.log( m_myname + " getDomainInfo: Caught STL std::exception - " + e.what(),  Logger::Error );
         	return false;
         }
 
@@ -169,17 +184,17 @@ bool OdbxBackend::getDomainInfo( const string& domain, DomainInfo& di )
 
 
 
-bool OdbxBackend::getSOA( const DNSName& domain, SOAData& sd, DNSPacket* p )
+bool OdbxBackend::getSOA( const DNSName& domain, SOAData& sd )
 {
         const char* tmp;
 
 
         try
         {
-        	DLOG( L.log( m_myname + " getSOA()", Logger::Debug ) );
+        	DLOG( g_log.log( m_myname + " getSOA()", Logger::Debug ) );
 
         	string stmt = getArg( "sql-lookupsoa" );
-        	string& stmtref = strbind( ":name", escape( domain.toStringNoDot(), READ ), stmt );
+        	string& stmtref = strbind( ":name", escape( domain.makeLowerCase().toStringRootDot(), READ ), stmt );
 
         	if( !execStmt( stmtref.c_str(), stmtref.size(), READ ) ) { return false; }
         	if( !getRecord( READ ) ) { return false; }
@@ -212,12 +227,12 @@ bool OdbxBackend::getSOA( const DNSName& domain, SOAData& sd, DNSPacket* p )
 
         		if( sd.nameserver.empty() )
         		{
-			        sd.nameserver = DNSName(arg()["default-soa-name"]);
+        			sd.nameserver = DNSName(arg()["default-soa-name"]);
         		}
 
         		if( sd.hostmaster.empty() )
         		{
-			        sd.hostmaster = DNSName("hostmaster") + DNSName(domain);
+        			sd.hostmaster = DNSName("hostmaster") + DNSName(domain);
         		}
 
         		sd.db = this;
@@ -226,7 +241,7 @@ bool OdbxBackend::getSOA( const DNSName& domain, SOAData& sd, DNSPacket* p )
         }
         catch( std::exception& e )
         {
-        	L.log( m_myname + " getSOA: Caught STL exception - " + e.what(),  Logger::Error );
+        	g_log.log( m_myname + " getSOA: Caught STL exception - " + e.what(),  Logger::Error );
         	return false;
         }
 
@@ -239,22 +254,22 @@ bool OdbxBackend::list( const DNSName& target, int zoneid, bool include_disabled
 {
         try
         {
-        	DLOG( L.log( m_myname + " list()", Logger::Debug ) );
+        	DLOG( g_log.log( m_myname + " list()", Logger::Debug ) );
 
-        	m_qname.empty();
+        	m_qname.clear();
         	m_result = NULL;
 
-        	int len = snprintf( m_buffer, sizeof( m_buffer ) - 1, "%d", zoneid );
+        	int len = snprintf( m_buffer, sizeof( m_buffer ), "%d", zoneid );
 
         	if( len < 0 )
         	{
-        		L.log( m_myname + " list: Unable to convert zone id to string - format error",  Logger::Error );
+        		g_log.log( m_myname + " list: Unable to convert zone id to string - format error",  Logger::Error );
         		return false;
         	}
 
         	if( len > static_cast<int>(sizeof( m_buffer )) - 1 )
         	{
-        		L.log( m_myname + " list: Unable to convert zone id to string - insufficient buffer space",  Logger::Error );
+        		g_log.log( m_myname + " list: Unable to convert zone id to string - insufficient buffer space",  Logger::Error );
         		return false;
         	}
 
@@ -265,7 +280,7 @@ bool OdbxBackend::list( const DNSName& target, int zoneid, bool include_disabled
         }
         catch( std::exception& e )
         {
-        	L.log( m_myname + " list: Caught STL exception - " + e.what(),  Logger::Error );
+        	g_log.log( m_myname + " list: Caught STL exception - " + e.what(),  Logger::Error );
         	return false;
         }
 
@@ -278,7 +293,7 @@ void OdbxBackend::lookup( const QType& qtype, const DNSName& qname, DNSPacket* d
 {
         try
         {
-        	DLOG( L.log( m_myname + " lookup()", Logger::Debug ) );
+        	DLOG( g_log.log( m_myname + " lookup()", Logger::Debug ) );
 
         	string stmt;
         	string& stmtref = stmt;
@@ -300,31 +315,30 @@ void OdbxBackend::lookup( const QType& qtype, const DNSName& qname, DNSPacket* d
         	{
         		if( qtype.getCode() == QType::ANY )
         		{
-         			stmt = getArg( "sql-lookupid" );
+        			stmt = getArg( "sql-lookupid" );
         		} else {
         			stmt = getArg( "sql-lookuptypeid" );
         			stmtref = strbind( ":type", qtype.getName(), stmt );
         		}
 
-        		int len = snprintf( m_buffer, sizeof( m_buffer ) - 1, "%d", zoneid );
+        		int len = snprintf( m_buffer, sizeof( m_buffer ), "%d", zoneid );
 
         		if( len < 0 )
         		{
-        			L.log( m_myname + " lookup: Unable to convert zone id to string - format error",  Logger::Error );
+        			g_log.log( m_myname + " lookup: Unable to convert zone id to string - format error",  Logger::Error );
         			throw( DBException( "Error: Libc error" ) );
         		}
 
         		if( len > static_cast<int>(sizeof( m_buffer )) - 1 )
         		{
-        			L.log( m_myname + " lookup: Unable to convert zone id to string - insufficient buffer space",  Logger::Error );
+        			g_log.log( m_myname + " lookup: Unable to convert zone id to string - insufficient buffer space",  Logger::Error );
         			throw( DBException( "Error: Libc error" ) );
         	}
 
         		stmtref = strbind( ":id", string( m_buffer, len ), stmtref );
         	}
 
-        	string tmp = qname.toStringNoDot();
-        	stmtref = strbind( ":name", escape( toLowerByRef( tmp ), READ ), stmtref );
+        	stmtref = strbind( ":name", escape( qname.makeLowerCase().toStringRootDot(), READ ), stmtref );
 
         	if( !execStmt( stmtref.c_str(), stmtref.size(), READ ) )
         	{
@@ -333,7 +347,7 @@ void OdbxBackend::lookup( const QType& qtype, const DNSName& qname, DNSPacket* d
         }
         catch( std::exception& e )
         {
-        	L.log( m_myname + " lookup: Caught STL exception - " + e.what(),  Logger::Error );
+        	g_log.log( m_myname + " lookup: Caught STL exception - " + e.what(),  Logger::Error );
         	throw( DBException( "Error: STL exception" ) );
         }
 }
@@ -347,7 +361,7 @@ bool OdbxBackend::get( DNSResourceRecord& rr )
 
         try
         {
-        	DLOG( L.log( m_myname + " get()", Logger::Debug ) );
+        	DLOG( g_log.log( m_myname + " get()", Logger::Debug ) );
 
         	if( getRecord( READ ) )
         	{
@@ -365,7 +379,7 @@ bool OdbxBackend::get( DNSResourceRecord& rr )
 
         		if( m_qname.empty() && ( tmp = odbx_field_value( m_result, 1 ) ) != NULL )
         		{
-			        rr.qname = DNSName( string(tmp, odbx_field_length( m_result, 1 ) ));
+        			rr.qname = DNSName( string(tmp, odbx_field_length( m_result, 1 ) ));
         		}
 
         		if( ( tmp = odbx_field_value( m_result, 2 ) ) != NULL )
@@ -396,7 +410,7 @@ bool OdbxBackend::get( DNSResourceRecord& rr )
         }
         catch( std::exception& e )
         {
-        	L.log( m_myname + " get: Caught STL exception - " + e.what(),  Logger::Error );
+        	g_log.log( m_myname + " get: Caught STL exception - " + e.what(),  Logger::Error );
         	return false;
         }
 
@@ -411,25 +425,25 @@ void OdbxBackend::setFresh( uint32_t domain_id )
 
         try
         {
-        	DLOG( L.log( m_myname + " setFresh()", Logger::Debug ) );
+        	DLOG( g_log.log( m_myname + " setFresh()", Logger::Debug ) );
 
         	if( !m_handle[WRITE] && !connectTo( m_hosts[WRITE], WRITE ) )
         	{
-        		L.log( m_myname + " setFresh: Master server is unreachable",  Logger::Error );
+        		g_log.log( m_myname + " setFresh: Master server is unreachable",  Logger::Error );
         		throw( DBException( "Error: Server unreachable" ) );
         	}
 
-        	len = snprintf( m_buffer, sizeof( m_buffer ) - 1, getArg( "sql-update-lastcheck" ).c_str(), time( 0 ), domain_id );
+        	len = snprintf( m_buffer, sizeof( m_buffer ), getArg( "sql-update-lastcheck" ).c_str(), time( 0 ), domain_id );
 
         	if( len < 0 )
         	{
-        		L.log( m_myname + " setFresh: Unable to insert values into statement '" + getArg( "sql-update-lastcheck" ) + "' - format error",  Logger::Error );
+        		g_log.log( m_myname + " setFresh: Unable to insert values into statement '" + getArg( "sql-update-lastcheck" ) + "' - format error",  Logger::Error );
         		throw( DBException( "Error: Libc error" ) );
         	}
 
         	if( len > static_cast<int>(sizeof( m_buffer )) - 1 )
         	{
-        		L.log( m_myname + " setFresh: Unable to insert values into statement '" + getArg( "sql-update-lastcheck" ) + "' - insufficient buffer space",  Logger::Error );
+        		g_log.log( m_myname + " setFresh: Unable to insert values into statement '" + getArg( "sql-update-lastcheck" ) + "' - insufficient buffer space",  Logger::Error );
         		throw( DBException( "Error: Libc error" ) );
         	}
 
@@ -440,7 +454,7 @@ void OdbxBackend::setFresh( uint32_t domain_id )
         }
         catch ( std::exception& e )
         {
-        	L.log( m_myname + " setFresh: Caught STL exception - " + e.what(),  Logger::Error );
+        	g_log.log( m_myname + " setFresh: Caught STL exception - " + e.what(),  Logger::Error );
         	throw( DBException( "Error: STL exception" ) );
         }
 }
@@ -451,25 +465,25 @@ void OdbxBackend::setNotified( uint32_t domain_id, uint32_t serial )
 {
         try
         {
-        	DLOG( L.log( m_myname + " setNotified()", Logger::Debug ) );
+        	DLOG( g_log.log( m_myname + " setNotified()", Logger::Debug ) );
 
         	if( !m_handle[WRITE] && !connectTo( m_hosts[WRITE], WRITE ) )
         	{
-        		L.log( m_myname + " setFresh: Master server is unreachable",  Logger::Error );
+        		g_log.log( m_myname + " setFresh: Master server is unreachable",  Logger::Error );
         		throw( DBException( "Error: Server unreachable" ) );
         	}
 
-        	int len = snprintf( m_buffer, sizeof( m_buffer ) - 1, getArg( "sql-update-serial" ).c_str(), serial, domain_id );
+        	int len = snprintf( m_buffer, sizeof( m_buffer ), getArg( "sql-update-serial" ).c_str(), serial, domain_id );
 
         	if( len < 0 )
         	{
-        		L.log( m_myname + " setNotified: Unable to insert values into statement '" + getArg( "sql-update-serial" ) + "' - format error",  Logger::Error );
+        		g_log.log( m_myname + " setNotified: Unable to insert values into statement '" + getArg( "sql-update-serial" ) + "' - format error",  Logger::Error );
         		throw( DBException( "Error: Libc error" ) );
         	}
 
         	if( len > static_cast<int>(sizeof( m_buffer )) - 1 )
         	{
-        		L.log( m_myname + " setNotified: Unable to insert values into statement '" + getArg( "sql-update-serial" ) + "' - insufficient buffer space",  Logger::Error );
+        		g_log.log( m_myname + " setNotified: Unable to insert values into statement '" + getArg( "sql-update-serial" ) + "' - insufficient buffer space",  Logger::Error );
         		throw( DBException( "Error: Libc error" ) );
         	}
 
@@ -480,45 +494,9 @@ void OdbxBackend::setNotified( uint32_t domain_id, uint32_t serial )
         }
         catch ( std::exception& e )
         {
-        	L.log( m_myname + " setNotified: Caught STL exception - " + e.what(),  Logger::Error );
+        	g_log.log( m_myname + " setNotified: Caught STL exception - " + e.what(),  Logger::Error );
         	throw( DBException( "Error: STL exception" ) );
         }
-}
-
-
-
-bool OdbxBackend::isMaster( const string& domain, const string& ip )
-{
-        try
-        {
-        	DLOG( L.log( m_myname + " isMaster()", Logger::Debug ) );
-
-        	string stmt = getArg( "sql-master" );
-        	string& stmtref = strbind( ":name", escape( toLower( domain ), READ ), stmt );
-
-        	if( !execStmt( stmtref.c_str(), stmtref.size(), READ ) ) { return false; }
-        	if( !getRecord( READ ) ) { return false; }
-
-        	do
-        	{
-        		if( odbx_field_value( m_result, 0 ) != NULL )
-        		{
-        			if( !strcmp( odbx_field_value( m_result, 0 ), ip.c_str() ) )
-        			{
-        				while( getRecord( READ ) );
-        				return true;
-        			}
-        		}
-        	}
-        	while( getRecord( READ ) );
-        }
-        catch ( std::exception& e )
-        {
-        	L.log( m_myname + " isMaster: Caught STL exception - " + e.what(),  Logger::Error );
-        	return false;
-        }
-
-        return false;
 }
 
 
@@ -527,11 +505,11 @@ void OdbxBackend::getUnfreshSlaveInfos( vector<DomainInfo>* unfresh )
 {
         try
         {
-        	DLOG( L.log( m_myname + " getUnfreshSlaveInfos()", Logger::Debug ) );
+        	DLOG( g_log.log( m_myname + " getUnfreshSlaveInfos()", Logger::Debug ) );
 
         	if( unfresh == NULL )
         	{
-        		L.log( m_myname + " getUnfreshSlaveInfos: invalid parameter - NULL pointer",  Logger::Error );
+        		g_log.log( m_myname + " getUnfreshSlaveInfos: invalid parameter - NULL pointer",  Logger::Error );
         		return;
         	}
 
@@ -539,7 +517,7 @@ void OdbxBackend::getUnfreshSlaveInfos( vector<DomainInfo>* unfresh )
         }
         catch ( std::exception& e )
         {
-        	L.log( m_myname + " getUnfreshSlaveInfo: Caught STL exception - " + e.what(),  Logger::Error );
+        	g_log.log( m_myname + " getUnfreshSlaveInfo: Caught STL exception - " + e.what(),  Logger::Error );
         }
 }
 
@@ -549,11 +527,11 @@ void OdbxBackend::getUpdatedMasters( vector<DomainInfo>* updated )
 {
         try
         {
-        	DLOG( L.log( m_myname + " getUpdatedMasters()", Logger::Debug ) );
+        	DLOG( g_log.log( m_myname + " getUpdatedMasters()", Logger::Debug ) );
 
         	if( updated == NULL )
         	{
-        		L.log( m_myname + " getUpdatedMasters: invalid parameter - NULL pointer",  Logger::Error );
+        		g_log.log( m_myname + " getUpdatedMasters: invalid parameter - NULL pointer",  Logger::Error );
         		return;
         	}
 
@@ -561,17 +539,17 @@ void OdbxBackend::getUpdatedMasters( vector<DomainInfo>* updated )
         }
         catch ( std::exception& e )
         {
-        	L.log( m_myname + " getUpdatedMasters: Caught STL exception - " + e.what(),  Logger::Error );
+        	g_log.log( m_myname + " getUpdatedMasters: Caught STL exception - " + e.what(),  Logger::Error );
         }
 }
 
 
 
-bool OdbxBackend::superMasterBackend( const string& ip, const string& domain, const vector<DNSResourceRecord>& set, string *nameserver, string* account, DNSBackend** ddb )
+bool OdbxBackend::superMasterBackend( const string& ip, const DNSName& domain, const vector<DNSResourceRecord>& set, string *nameserver, string* account, DNSBackend** ddb )
 {
         try
         {
-        	DLOG( L.log( m_myname + " superMasterBackend()", Logger::Debug ) );
+        	DLOG( g_log.log( m_myname + " superMasterBackend()", Logger::Debug ) );
 
         	if( account != NULL && ddb != NULL )
         	{
@@ -602,7 +580,7 @@ bool OdbxBackend::superMasterBackend( const string& ip, const string& domain, co
         }
         catch ( std::exception& e )
         {
-        	L.log( m_myname + " superMasterBackend: Caught STL exception - " + e.what(),  Logger::Error );
+        	g_log.log( m_myname + " superMasterBackend: Caught STL exception - " + e.what(),  Logger::Error );
         	return false;
         }
 
@@ -611,31 +589,30 @@ bool OdbxBackend::superMasterBackend( const string& ip, const string& domain, co
 
 
 
-bool OdbxBackend::createSlaveDomain( const string& ip, const string& domain, const string &nameserver, const string& account )
+bool OdbxBackend::createSlaveDomain( const string& ip, const DNSName& domain, const string &nameserver, const string& account )
 {
         try
         {
-        	DLOG( L.log( m_myname + " createSlaveDomain()", Logger::Debug ) );
+        	DLOG( g_log.log( m_myname + " createSlaveDomain()", Logger::Debug ) );
 
         	if( !m_handle[WRITE] && !connectTo( m_hosts[WRITE], WRITE ) )
         	{
-        		L.log( m_myname + " createSlaveDomain: Master server is unreachable",  Logger::Error );
+        		g_log.log( m_myname + " createSlaveDomain: Master server is unreachable",  Logger::Error );
         		return false;
         	}
 
-        	string tmp = domain;
-        	int len = snprintf( m_buffer, sizeof( m_buffer ) - 1, getArg( "sql-insert-slave" ).c_str(), escape( toLowerByRef( tmp ), WRITE ).c_str(),
+        	int len = snprintf( m_buffer, sizeof( m_buffer ), getArg( "sql-insert-slave" ).c_str(), escape( domain.makeLowerCase().toStringRootDot(), WRITE ).c_str(),
         		escape( ip, WRITE ).c_str(), escape( account, WRITE ).c_str() );
 
         	if( len < 0 )
         	{
-        		L.log( m_myname + " createSlaveDomain: Unable to insert values in statement '" + getArg( "sql-insert-slave" ) + "' - format error",  Logger::Error );
+        		g_log.log( m_myname + " createSlaveDomain: Unable to insert values in statement '" + getArg( "sql-insert-slave" ) + "' - format error",  Logger::Error );
         		return false;
         	}
 
         	if( len > static_cast<int>(sizeof( m_buffer )) - 1 )
         	{
-        		L.log( m_myname + " createSlaveDomain: Unable to insert values in statement '" + getArg( "sql-insert-slave" ) + "' - insufficient buffer space",  Logger::Error );
+        		g_log.log( m_myname + " createSlaveDomain: Unable to insert values in statement '" + getArg( "sql-insert-slave" ) + "' - insufficient buffer space",  Logger::Error );
         		return false;
         	}
 
@@ -643,7 +620,7 @@ bool OdbxBackend::createSlaveDomain( const string& ip, const string& domain, con
         }
         catch ( std::exception& e )
         {
-        	L.log( m_myname + " createSlaveDomain: Caught STL exception - " + e.what(),  Logger::Error );
+        	g_log.log( m_myname + " createSlaveDomain: Caught STL exception - " + e.what(),  Logger::Error );
         	return false;
         }
 
@@ -652,45 +629,42 @@ bool OdbxBackend::createSlaveDomain( const string& ip, const string& domain, con
 
 
 
-bool OdbxBackend::feedRecord( const DNSResourceRecord& rr, string *ordername )
+bool OdbxBackend::feedRecord( const DNSResourceRecord& rr, const DNSName& ordername )
 {
         try
         {
-        	DLOG( L.log( m_myname + " feedRecord()", Logger::Debug ) );
+        	DLOG( g_log.log( m_myname + " feedRecord()", Logger::Debug ) );
 
         	if( !m_handle[WRITE] && !connectTo( m_hosts[WRITE], WRITE ) )
         	{
-        		L.log( m_myname + " feedRecord: Master server is unreachable",  Logger::Error );
+        		g_log.log( m_myname + " feedRecord: Master server is unreachable",  Logger::Error );
         		return false;
         	}
 
-        	string tmp = rr.qname.toStringNoDot();
-
-        	int priority=0;
+        	unsigned int priority=0;
         	string content(rr.content);
 
         	if(rr.qtype == QType::MX || rr.qtype == QType::SRV) {
-        		priority=atoi(content.c_str());
-
+        		priority=pdns_stou(content);
         		string::size_type pos = content.find_first_not_of("0123456789");
         		if(pos != string::npos)
         			boost::erase_head(content, pos);
         		trim_left(content);
         	}
 
-        	int len = snprintf( m_buffer, sizeof( m_buffer ) - 1, getArg( "sql-insert-record" ).c_str(), rr.domain_id,
-        		escape( toLowerByRef( tmp ), WRITE ).c_str(), rr.qtype.getName().c_str(), rr.ttl, priority,
+        	int len = snprintf( m_buffer, sizeof( m_buffer ), getArg( "sql-insert-record" ).c_str(), rr.domain_id,
+        		escape( rr.qname.makeLowerCase().toStringRootDot(), WRITE ).c_str(), rr.qtype.getName().c_str(), rr.ttl, priority,
         		escape( content, WRITE ).c_str() );
 
         	if( len < 0 )
         	{
-        		L.log( m_myname + " feedRecord: Unable to insert values in statement '" + getArg( "sql-insert-record" ) + "' - format error",  Logger::Error );
+        		g_log.log( m_myname + " feedRecord: Unable to insert values in statement '" + getArg( "sql-insert-record" ) + "' - format error",  Logger::Error );
         		return false;
         	}
 
         	if( len > static_cast<int>(sizeof( m_buffer )) - 1 )
         	{
-        		L.log( m_myname + " feedRecord: Unable to insert values in statement '" + getArg( "sql-insert-record" ) + "' - insufficient buffer space",  Logger::Error );
+        		g_log.log( m_myname + " feedRecord: Unable to insert values in statement '" + getArg( "sql-insert-record" ) + "' - insufficient buffer space",  Logger::Error );
         		return false;
         	}
 
@@ -698,7 +672,7 @@ bool OdbxBackend::feedRecord( const DNSResourceRecord& rr, string *ordername )
         }
         catch ( std::exception& e )
         {
-        	L.log( m_myname + " feedRecord: Caught STL exception - " + e.what(),  Logger::Error );
+        	g_log.log( m_myname + " feedRecord: Caught STL exception - " + e.what(),  Logger::Error );
         	return false;
         }
 
@@ -707,43 +681,43 @@ bool OdbxBackend::feedRecord( const DNSResourceRecord& rr, string *ordername )
 
 
 
-bool OdbxBackend::startTransaction( const string& domain, int zoneid )
+bool OdbxBackend::startTransaction( const DNSName& domain, int zoneid )
 {
         try
         {
-        	DLOG( L.log( m_myname + " startTransaction()", Logger::Debug ) );
+        	DLOG( g_log.log( m_myname + " startTransaction()", Logger::Debug ) );
 
         	if( !m_handle[WRITE] && !connectTo( m_hosts[WRITE], WRITE ) )
         	{
-        		L.log( m_myname + " startTransaction: Master server is unreachable",  Logger::Error );
+        		g_log.log( m_myname + " startTransaction: Master server is unreachable",  Logger::Error );
         		return false;
         	}
 
-		string stmtref =  getArg( "sql-transactbegin" );
-		if( !execStmt( stmtref.c_str(), stmtref.size(), WRITE ) ) { return false; }
-        	int len = snprintf( m_buffer, sizeof( m_buffer ) - 1, "%d", zoneid );
+        	string stmtref =  getArg( "sql-transactbegin" );
+        	if( !execStmt( stmtref.c_str(), stmtref.size(), WRITE ) ) { return false; }
+        	int len = snprintf( m_buffer, sizeof( m_buffer ), "%d", zoneid );
 
         	if( len < 0 )
         	{
-        		L.log( m_myname + " startTransaction: Unable to convert zone id to string - format error",  Logger::Error );
+        		g_log.log( m_myname + " startTransaction: Unable to convert zone id to string - format error",  Logger::Error );
         		return false;
         	}
 
         	if( len > static_cast<int>(sizeof( m_buffer )) - 1 )
         	{
-        		L.log( m_myname + " startTransaction: Unable to convert zone id to string - insufficient buffer space",  Logger::Error );
+        		g_log.log( m_myname + " startTransaction: Unable to convert zone id to string - insufficient buffer space",  Logger::Error );
         		return false;
         	}
 
                 if(zoneid >= 0) {
-        	        string stmt = getArg( "sql-zonedelete" );
-        	        stmtref = strbind( ":id", string( m_buffer, len ), stmt );
-        	        if( !execStmt( stmtref.c_str(), stmtref.size(), WRITE ) ) { return false; }
+        		string stmt = getArg( "sql-zonedelete" );
+        		stmtref = strbind( ":id", string( m_buffer, len ), stmt );
+        		if( !execStmt( stmtref.c_str(), stmtref.size(), WRITE ) ) { return false; }
                 }
         }
         catch ( std::exception& e )
         {
-        	L.log( m_myname + " startTransaction: Caught STL exception - " + e.what(),  Logger::Error );
+        	g_log.log( m_myname + " startTransaction: Caught STL exception - " + e.what(),  Logger::Error );
         	return false;
         }
 
@@ -756,11 +730,11 @@ bool OdbxBackend::commitTransaction()
 {
         try
         {
-        	DLOG( L.log( m_myname + " commitTransaction()", Logger::Debug ) );
+        	DLOG( g_log.log( m_myname + " commitTransaction()", Logger::Debug ) );
 
         	if( !m_handle[WRITE] && !connectTo( m_hosts[WRITE], WRITE ) )
         	{
-        		L.log( m_myname + " commitTransaction: Master server is unreachable",  Logger::Error );
+        		g_log.log( m_myname + " commitTransaction: Master server is unreachable",  Logger::Error );
         		return false;
         	}
 
@@ -769,7 +743,7 @@ bool OdbxBackend::commitTransaction()
         }
         catch ( std::exception& e )
         {
-        	L.log( m_myname + " commitTransaction: Caught STL exception - " + e.what(),  Logger::Error );
+        	g_log.log( m_myname + " commitTransaction: Caught STL exception - " + e.what(),  Logger::Error );
         	return false;
         }
 
@@ -782,11 +756,11 @@ bool OdbxBackend::abortTransaction()
 {
         try
         {
-        	DLOG( L.log( m_myname + " abortTransaction()", Logger::Debug ) );
+        	DLOG( g_log.log( m_myname + " abortTransaction()", Logger::Debug ) );
 
         	if( !m_handle[WRITE] && !connectTo( m_hosts[WRITE], WRITE ) )
         	{
-        		L.log( m_myname + " abortTransaction: Master server is unreachable",  Logger::Error );
+        		g_log.log( m_myname + " abortTransaction: Master server is unreachable",  Logger::Error );
         		return false;
         	}
 
@@ -795,7 +769,7 @@ bool OdbxBackend::abortTransaction()
         }
         catch ( std::exception& e )
         {
-        	L.log( m_myname + " abortTransaction: Caught STL exception - " + e.what(),  Logger::Error );
+        	g_log.log( m_myname + " abortTransaction: Caught STL exception - " + e.what(),  Logger::Error );
         	return false;
         }
 

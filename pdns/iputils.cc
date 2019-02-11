@@ -1,3 +1,24 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -11,6 +32,10 @@ static void RuntimeError(const boost::format& fmt)
   throw runtime_error(fmt.str());
 }
 
+static void NetworkErr(const boost::format& fmt)
+{
+  throw NetworkError(fmt.str());
+}
 
 int SSocket(int family, int type, int flags)
 {
@@ -23,16 +48,65 @@ int SSocket(int family, int type, int flags)
 int SConnect(int sockfd, const ComboAddress& remote)
 {
   int ret = connect(sockfd, (struct sockaddr*)&remote, remote.getSocklen());
-  if(ret < 0)
-    RuntimeError(boost::format("connecting socket to %s: %s") % remote.toStringWithPort() % strerror(errno));
+  if(ret < 0) {
+    int savederrno = errno;
+    RuntimeError(boost::format("connecting socket to %s: %s") % remote.toStringWithPort() % strerror(savederrno));
+  }
+  return ret;
+}
+
+int SConnectWithTimeout(int sockfd, const ComboAddress& remote, int timeout)
+{
+  int ret = connect(sockfd, (struct sockaddr*)&remote, remote.getSocklen());
+  if(ret < 0) {
+    int savederrno = errno;
+    if (savederrno == EINPROGRESS) {
+      if (timeout <= 0) {
+        return ret;
+      }
+
+      /* we wait until the connection has been established */
+      bool error = false;
+      bool disconnected = false;
+      int res = waitForRWData(sockfd, false, timeout, 0, &error, &disconnected);
+      if (res == 1) {
+        if (error) {
+          savederrno = 0;
+          socklen_t errlen = sizeof(savederrno);
+          if (getsockopt(sockfd, SOL_SOCKET, SO_ERROR, (void *)&savederrno, &errlen) == 0) {
+            NetworkErr(boost::format("connecting to %s failed: %s") % remote.toStringWithPort() % string(strerror(savederrno)));
+          }
+          else {
+            NetworkErr(boost::format("connecting to %s failed") % remote.toStringWithPort());
+          }
+        }
+        if (disconnected) {
+          NetworkErr(boost::format("%s closed the connection") % remote.toStringWithPort());
+        }
+        return 0;
+      }
+      else if (res == 0) {
+        NetworkErr(boost::format("timeout while connecting to %s") % remote.toStringWithPort());
+      } else if (res < 0) {
+        savederrno = errno;
+        NetworkErr(boost::format("waiting to connect to %s: %s") % remote.toStringWithPort() % string(strerror(savederrno)));
+      }
+    }
+    else {
+      NetworkErr(boost::format("connecting to %s: %s") % remote.toStringWithPort() % string(strerror(savederrno)));
+    }
+  }
+
   return ret;
 }
 
 int SBind(int sockfd, const ComboAddress& local)
 {
   int ret = bind(sockfd, (struct sockaddr*)&local, local.getSocklen());
-  if(ret < 0)
-    RuntimeError(boost::format("binding socket to %s: %s") % local.toStringWithPort() % strerror(errno));
+  if(ret < 0) {
+    int savederrno = errno;
+    RuntimeError(boost::format("binding socket to %s: %s") % local.toStringWithPort() % strerror(savederrno));
+  }
   return ret;
 }
 
@@ -77,11 +151,15 @@ bool HarvestTimestamp(struct msghdr* msgh, struct timeval* tv)
 #endif
   return false;
 }
-bool HarvestDestinationAddress(struct msghdr* msgh, ComboAddress* destination)
+bool HarvestDestinationAddress(const struct msghdr* msgh, ComboAddress* destination)
 {
-  memset(destination, 0, sizeof(*destination));
-  struct cmsghdr *cmsg;
-  for (cmsg = CMSG_FIRSTHDR(msgh); cmsg != NULL; cmsg = CMSG_NXTHDR(msgh,cmsg)) {
+  destination->reset();
+#ifdef __NetBSD__
+  struct cmsghdr* cmsg;
+#else
+  const struct cmsghdr* cmsg;
+#endif
+  for (cmsg = CMSG_FIRSTHDR(msgh); cmsg != NULL; cmsg = CMSG_NXTHDR(const_cast<struct msghdr*>(msgh), const_cast<struct cmsghdr*>(cmsg))) {
 #if defined(IP_PKTINFO)
      if ((cmsg->cmsg_level == IPPROTO_IP) && (cmsg->cmsg_type == IP_PKTINFO)) {
         struct in_pktinfo *i = (struct in_pktinfo *) CMSG_DATA(cmsg);
@@ -118,7 +196,7 @@ bool IsAnyAddress(const ComboAddress& addr)
   return false;
 }
 
-int sendfromto(int sock, const char* data, int len, int flags, const ComboAddress& from, const ComboAddress& to)
+ssize_t sendfromto(int sock, const char* data, size_t len, int flags, const ComboAddress& from, const ComboAddress& to)
 {
   struct msghdr msgh;
   struct iovec iov;
@@ -134,7 +212,7 @@ int sendfromto(int sock, const char* data, int len, int flags, const ComboAddres
   msgh.msg_namelen = to.getSocklen();
 
   if(from.sin4.sin_family) {
-    addCMsgSrcAddr(&msgh, cbuf, &from);
+    addCMsgSrcAddr(&msgh, cbuf, &from, 0);
   }
   else {
     msgh.msg_control=NULL;
@@ -161,7 +239,8 @@ void fillMSGHdr(struct msghdr* msgh, struct iovec* iov, char* cbuf, size_t cbufs
   msgh->msg_flags = 0;
 }
 
-void ComboAddress::truncate(unsigned int bits)
+// warning: various parts of PowerDNS assume 'truncate' will never throw
+void ComboAddress::truncate(unsigned int bits) noexcept
 {
   uint8_t* start;
   int len=4;
@@ -188,4 +267,192 @@ void ComboAddress::truncate(unsigned int bits)
   // so and by '11111100', which is ~((1<<2)-1)  = ~3
   uint8_t* place = start + len - 1 - tozero/8; 
   *place &= (~((1<<bitsleft)-1));
+}
+
+ssize_t sendMsgWithTimeout(int fd, const char* buffer, size_t len, int timeout, ComboAddress& dest, const ComboAddress& local, unsigned int localItf)
+{
+  struct msghdr msgh;
+  struct iovec iov;
+  char cbuf[256];
+  bool firstTry = true;
+  fillMSGHdr(&msgh, &iov, cbuf, sizeof(cbuf), const_cast<char*>(buffer), len, &dest);
+  addCMsgSrcAddr(&msgh, cbuf, &local, localItf);
+
+  do {
+    ssize_t written = sendmsg(fd, &msgh, 0);
+
+    if (written > 0)
+      return written;
+
+    if (errno == EAGAIN) {
+      if (firstTry) {
+        int res = waitForRWData(fd, false, timeout, 0);
+        if (res > 0) {
+          /* there is room available */
+          firstTry = false;
+        }
+        else if (res == 0) {
+          throw runtime_error("Timeout while waiting to write data");
+        } else {
+          throw runtime_error("Error while waiting for room to write data");
+        }
+      }
+      else {
+        throw runtime_error("Timeout while waiting to write data");
+      }
+    }
+    else {
+      unixDie("failed in write2WithTimeout");
+    }
+  }
+  while (firstTry);
+
+  return 0;
+}
+
+template class NetmaskTree<bool>;
+
+bool sendSizeAndMsgWithTimeout(int sock, uint16_t bufferLen, const char* buffer, int idleTimeout, const ComboAddress* dest, const ComboAddress* local, unsigned int localItf, int totalTimeout, int flags)
+{
+  uint16_t size = htons(bufferLen);
+  char cbuf[256];
+  struct msghdr msgh;
+  struct iovec iov[2];
+  int remainingTime = totalTimeout;
+  time_t start = 0;
+  if (totalTimeout) {
+    start = time(NULL);
+  }
+
+  /* Set up iov and msgh structures. */
+  memset(&msgh, 0, sizeof(struct msghdr));
+  msgh.msg_control = nullptr;
+  msgh.msg_controllen = 0;
+  if (dest) {
+    msgh.msg_name = reinterpret_cast<void*>(const_cast<ComboAddress*>(dest));
+    msgh.msg_namelen = dest->getSocklen();
+  }
+  else {
+    msgh.msg_name = nullptr;
+    msgh.msg_namelen = 0;
+  }
+
+  msgh.msg_flags = 0;
+
+  if (localItf != 0 && local) {
+    addCMsgSrcAddr(&msgh, cbuf, local, localItf);
+  }
+
+  iov[0].iov_base = &size;
+  iov[0].iov_len = sizeof(size);
+  iov[1].iov_base = reinterpret_cast<void*>(const_cast<char*>(buffer));
+  iov[1].iov_len = bufferLen;
+
+  size_t pos = 0;
+  size_t sent = 0;
+  size_t nbElements = sizeof(iov)/sizeof(*iov);
+  while (true) {
+    msgh.msg_iov = &iov[pos];
+    msgh.msg_iovlen = nbElements - pos;
+
+    ssize_t res = sendmsg(sock, &msgh, flags);
+    if (res > 0) {
+      size_t written = static_cast<size_t>(res);
+      sent += written;
+
+      if (sent == (sizeof(size) + bufferLen)) {
+        return true;
+      }
+      /* partial write, we need to keep only the (parts of) elements
+         that have not been written.
+      */
+      do {
+        if (written < iov[pos].iov_len) {
+          iov[pos].iov_len -= written;
+          iov[pos].iov_base = reinterpret_cast<void*>(reinterpret_cast<char*>(iov[pos].iov_base) + written);
+          written = 0;
+        }
+        else {
+          written -= iov[pos].iov_len;
+          iov[pos].iov_len = 0;
+          pos++;
+        }
+      }
+      while (written > 0 && pos < nbElements);
+    }
+    else if (res == -1) {
+      if (errno == EINTR) {
+        continue;
+      }
+      else if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINPROGRESS) {
+        /* EINPROGRESS might happen with non blocking socket,
+           especially with TCP Fast Open */
+        int ret = waitForRWData(sock, false, (totalTimeout == 0 || idleTimeout <= remainingTime) ? idleTimeout : remainingTime, 0);
+        if (ret > 0) {
+          /* there is room available */
+        }
+        else if (ret == 0) {
+          throw runtime_error("Timeout while waiting to send data");
+        } else {
+          throw runtime_error("Error while waiting for room to send data");
+        }
+      }
+      else {
+        unixDie("failed in sendSizeAndMsgWithTimeout");
+      }
+    }
+    if (totalTimeout) {
+      time_t now = time(NULL);
+      int elapsed = now - start;
+      if (elapsed >= remainingTime) {
+        throw runtime_error("Timeout while sending data");
+      }
+      start = now;
+      remainingTime -= elapsed;
+    }
+  }
+
+  return false;
+}
+
+/* requires a non-blocking socket.
+   On Linux, we could use MSG_DONTWAIT on a blocking socket
+   but this is not portable.
+*/
+bool isTCPSocketUsable(int sock)
+{
+  int err = 0;
+  char buf = '\0';
+  size_t buf_size = sizeof(buf);
+
+  do {
+    ssize_t got = recv(sock, &buf, buf_size, MSG_PEEK);
+
+    if (got > 0) {
+      /* socket is usable, some data is even waiting to be read */
+      return true;
+    }
+    else if (got == 0) {
+      /* other end has closed the socket */
+      return false;
+    }
+    else {
+      err = errno;
+
+      if (err == EAGAIN || err == EWOULDBLOCK) {
+        /* socket is usable, no data waiting */
+        return true;
+      }
+      else {
+        if (err != EINTR) {
+          /* something is wrong, could be ECONNRESET,
+             ENOTCONN, EPIPE, but anyway this socket is
+             not usable. */
+          return false;
+        }
+      }
+    }
+  } while (err == EINTR);
+
+  return false;
 }

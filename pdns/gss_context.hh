@@ -1,3 +1,24 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifndef GSS_CONTEXT_HH
 #define GSS_CONTEXT_HH
 #pragma once
@@ -37,7 +58,7 @@ public:
     setName("");
   };
 
-  //! Initilize using specific name
+  //! Initialize using specific name
   GssName(const std::string& name) {
     setName(name);
   };
@@ -68,7 +89,7 @@ public:
   };
 
   //! Compare two Gss Names, if no gss support is compiled in, returns false always
-  //! This is not necessarely same as string comparison between two non-parsed names
+  //! This is not necessarily same as string comparison between two non-parsed names
   bool operator==(const GssName& rhs) {
 #ifdef ENABLE_GSS_TSIG
     OM_uint32 maj,min;
@@ -80,7 +101,7 @@ public:
   }
 
   //! Compare two Gss Names, if no gss support is compiled in, returns false always
-  //! This is not necessarely same as string comparison between two non-parsed names
+  //! This is not necessarily same as string comparison between two non-parsed names
   bool match(const std::string& name) {
 #ifdef ENABLE_GSS_TSIG
     OM_uint32 maj,min;
@@ -91,7 +112,7 @@ public:
     buffer.value = (void*)name.c_str();
     maj = gss_import_name(&min, &buffer, (gss_OID)GSS_KRB5_NT_PRINCIPAL_NAME, &comp);
     if (maj != GSS_S_COMPLETE)
-      throw PDNSException("Could not import " + name + ": " + boost::lexical_cast<std::string>(maj) + string(",") + boost::lexical_cast<std::string>(min));
+      throw PDNSException("Could not import " + name + ": " + std::to_string(maj) + string(",") + std::to_string(min));
     // do comparison
     maj = gss_compare_name(&min, d_name, comp, &result);
     gss_release_name(&min, &comp);
@@ -120,19 +141,19 @@ class GssContext {
 public:
   static bool supported(); //<! Returns true if GSS is supported in the first place
   GssContext(); //<! Construct new GSS context with random name
-  GssContext(const std::string& label); //<! Create or open existing named context
+  GssContext(const DNSName& label); //<! Create or open existing named context
 
   void setLocalPrincipal(const std::string& name); //<! Set our gss name
   bool getLocalPrincipal(std::string& name); //<! Get our name
   void setPeerPrincipal(const std::string& name); //<! Set remote name (do not use after negotiation)
-  bool getPeerPrincipal(std::string &name); //<! Return remote name, returns actual name after negotatioan
+  bool getPeerPrincipal(std::string &name); //<! Return remote name, returns actual name after negotiation
 
   void generateLabel(const std::string& suffix); //<! Generate random context name using suffix (such as mydomain.com)
-  void setLabel(const std::string& label); //<! Set context name to this label
-  const std::string& getLabel() { return d_label; } //<! Return context name
+  void setLabel(const DNSName& label); //<! Set context name to this label
+  const DNSName& getLabel() { return d_label; } //<! Return context name
 
   bool init(const std::string &input, std::string& output); //<! Perform GSS Initiate Security Context handshake
-  bool accept(const std::string &input, std::string& output); //<! Perform GSS Acccept Security Context handshake
+  bool accept(const std::string &input, std::string& output); //<! Perform GSS Accept Security Context handshake
   bool destroy(); //<! Release the cached context
   bool expired(); //<! Check if context is expired
   bool valid(); //<! Check if context is valid
@@ -148,7 +169,7 @@ public:
 #ifdef ENABLE_GSS_TSIG
   void processError(const string& method, OM_uint32 maj, OM_uint32 min); //<! Process and fill error text vector
 #endif
-  std::string d_label; //<! Context name
+  DNSName d_label; //<! Context name
   std::string d_peerPrincipal; //<! Remote name
   std::string d_localPrincipal; //<! Our name
   GssContextError d_error; //<! Context error

@@ -1,26 +1,72 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 #include "geoipbackend.hh"
+#include "geoipinterface.hh"
+#include "pdns/dns_random.hh"
 #include <sstream>
 #include <regex.h>
 #include <glob.h>
+#include <boost/algorithm/string/replace.hpp>
+#include <fstream>
+#include <yaml-cpp/yaml.h>
 
 pthread_rwlock_t GeoIPBackend::s_state_lock=PTHREAD_RWLOCK_INITIALIZER;
 
-class GeoIPDomain {
-public:
+struct GeoIPDNSResourceRecord: DNSResourceRecord {
+  int weight;
+  bool has_weight;
+};
+
+struct GeoIPService {
+  NetmaskTree<vector<string> > masks;
+  unsigned int netmask4;
+  unsigned int netmask6;
+};
+
+struct GeoIPDomain {
   int id;
   DNSName domain;
   int ttl;
-  map<DNSName, string> services;
-  map<DNSName, vector<DNSResourceRecord> > records;
+  map<DNSName, GeoIPService> services;
+  map<DNSName, vector<GeoIPDNSResourceRecord> > records;
 };
 
 static vector<GeoIPDomain> s_domains;
-static GeoIP *s_gi = 0; // geoip database
-static GeoIP *s_gi6 = 0; // geoip database
-static int s_rc = 0; // refcount
+static int s_rc = 0; // refcount - always accessed under lock
+
+static string GeoIP_WEEKDAYS[] = { "mon", "tue", "wed", "thu", "fri", "sat", "sun" };
+static string GeoIP_MONTHS[] = { "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec" };
+
+/* So how does it work - we have static records and services. Static records "win".
+   We also insert empty non terminals for records and services.
+
+   If a service makes an internal reference to a domain also hosted within geoip, we give a direct
+   answers, no CNAMEs involved.
+
+   If the reference is external, we spoof up a CNAME, and good luck with that
+*/
 
 GeoIPBackend::GeoIPBackend(const string& suffix) {
   WriteLock wl(&s_state_lock);
@@ -37,88 +83,136 @@ GeoIPBackend::GeoIPBackend(const string& suffix) {
   if (s_rc == 0) { // first instance gets to open everything
     initialize();
   }
-  d_dbmode = GeoIP_database_edition(s_gi);
   s_rc++;
 }
+
+static vector<std::unique_ptr<GeoIPInterface> > s_geoip_files;
+
+string getGeoForLua(const std::string& ip, int qaint);
+static string queryGeoIP(const string &ip, bool v6, GeoIPInterface::GeoIPQueryAttribute attribute, GeoIPNetmask& gl);
 
 void GeoIPBackend::initialize() {
   YAML::Node config;
   vector<GeoIPDomain> tmp_domains;
-  GeoIP *gi;
 
-  string mode = getArg("database-cache");
-  int flags;
-  if (mode == "standard") 
-    flags = GEOIP_STANDARD;
-  else if (mode == "memory")
-    flags = GEOIP_MEMORY_CACHE;
-  else if (mode == "index") 
-    flags = GEOIP_INDEX_CACHE;
-#ifdef HAVE_MMAP
-  else if (mode == "mmap")
-    flags = GEOIP_MMAP_CACHE;
-#endif
-  else
-    throw PDNSException("Invalid cache mode " + mode + " for GeoIP backend");
+  s_geoip_files.clear(); // reset pointers
 
-  if (getArg("database-file").empty() == false) {
-    gi = GeoIP_open(getArg("database-file").c_str(), flags);
-    if (gi == NULL)
-      throw PDNSException("Cannot open GeoIP database " + getArg("database-file"));
-    if (s_gi) GeoIP_delete(s_gi);
-    s_gi = gi;
-  }
-  if (getArg("database-file6").empty() == false) {
-    gi = GeoIP_open(getArg("database-file6").c_str(), flags);
-    if (gi == NULL)
-      throw PDNSException("Cannot open GeoIP database " + getArg("database-file6"));
-    if (s_gi6) GeoIP_delete(s_gi6);
-    s_gi6 = gi;
+  if (getArg("database-files").empty() == false) {
+    vector<string> files;
+    stringtok(files, getArg("database-files"), " ,\t\r\n");
+    for(auto const& file: files) {
+      s_geoip_files.push_back(GeoIPInterface::makeInterface(file));
+    }
   }
 
-  if (s_gi == NULL && s_gi6 == NULL) 
-    throw PDNSException("You need to specify one database at least");
+  if (s_geoip_files.empty())
+    g_log<<Logger::Warning<<"No GeoIP database files loaded!"<<endl;
 
-  config = YAML::LoadFile(getArg("zones-file"));
+  if(!getArg("zones-file").empty()) {
+    try {
+       config = YAML::LoadFile(getArg("zones-file"));
+    } catch (YAML::Exception &ex) {
+       throw PDNSException(string("Cannot read config file ") + ex.msg);
+    }
+  }
 
-  BOOST_FOREACH(YAML::Node domain, config["domains"]) {
+  for(YAML::Node domain :  config["domains"]) {
     GeoIPDomain dom;
-    dom.id = s_domains.size();
+    dom.id = tmp_domains.size();
     dom.domain = DNSName(domain["domain"].as<string>());
     dom.ttl = domain["ttl"].as<int>();
 
     for(YAML::const_iterator recs = domain["records"].begin(); recs != domain["records"].end(); recs++) {
       DNSName qname = DNSName(recs->first.as<string>());
-      vector<DNSResourceRecord> rrs;
+      vector<GeoIPDNSResourceRecord> rrs;
 
-      BOOST_FOREACH(YAML::Node item, recs->second) {
+      for(YAML::Node item :  recs->second) {
         YAML::const_iterator rec = item.begin();
-        DNSResourceRecord rr;
+        GeoIPDNSResourceRecord rr;
         rr.domain_id = dom.id;
         rr.ttl = dom.ttl;
         rr.qname = qname;
         if (rec->first.IsNull()) {
-          rr.qtype = "NULL";
+          rr.qtype = QType(0);
         } else {
           string qtype = boost::to_upper_copy(rec->first.as<string>());
           rr.qtype = qtype;
         }
+        rr.has_weight = false;
+        rr.weight = 100;
         if (rec->second.IsNull()) {
           rr.content = "";
+        } else if (rec->second.IsMap()) {
+           for(YAML::const_iterator iter = rec->second.begin(); iter != rec->second.end(); iter++) {
+             string attr = iter->first.as<string>();
+             if (attr == "content") {
+               string content = iter->second.as<string>();
+               rr.content = content;
+             } else if (attr == "weight") {
+               rr.weight = iter->second.as<int>();
+               if (rr.weight <= 0) {
+                 g_log<<Logger::Error<<"Weight must be positive for " << rr.qname << endl;
+                 throw PDNSException(string("Weight must be positive for ") + rr.qname.toLogString());
+               }
+               rr.has_weight = true;
+             } else if (attr == "ttl") {
+               rr.ttl = iter->second.as<int>();
+             } else {
+               g_log<<Logger::Error<<"Unsupported record attribute " << attr << " for " << rr.qname << endl;
+               throw PDNSException(string("Unsupported record attribute ") + attr + string(" for ") + rr.qname.toLogString());
+             }
+           }
         } else {
           string content=rec->second.as<string>();
           rr.content = content;
-        } 
-                
+          rr.weight = 100;
+        }
         rr.auth = 1;
-        rr.d_place = DNSResourceRecord::ANSWER;
         rrs.push_back(rr);
       }
       std::swap(dom.records[qname], rrs);
     }
 
     for(YAML::const_iterator service = domain["services"].begin(); service != domain["services"].end(); service++) {
-      dom.services[DNSName(service->first.as<string>())] = service->second.as<string>();
+      unsigned int netmask4 = 0, netmask6 = 0;
+      DNSName srvName{service->first.as<string>()};
+      NetmaskTree<vector<string> > nmt;
+
+      // if it's an another map, we need to iterate it again, otherwise we just add two root entries.
+      if (service->second.IsMap()) {
+        for(YAML::const_iterator net = service->second.begin(); net != service->second.end(); net++) {
+          vector<string> value;
+          if (net->second.IsSequence()) {
+            value = net->second.as<vector<string> >();
+          } else {
+            value.push_back(net->second.as<string>());
+          }
+          if (net->first.as<string>() == "default") {
+            nmt.insert(Netmask("0.0.0.0/0")).second.assign(value.begin(),value.end());
+            nmt.insert(Netmask("::/0")).second.swap(value);
+          } else {
+            Netmask nm{net->first.as<string>()};
+            nmt.insert(nm).second.swap(value);
+            if (nm.isIpv6() == true && netmask6 < nm.getBits())
+              netmask6 = nm.getBits();
+            if (nm.isIpv6() == false && netmask4 < nm.getBits())
+              netmask4 = nm.getBits();
+          }
+        }
+      } else {
+        vector<string> value;
+        if (service->second.IsSequence()) {
+          value = service->second.as<vector<string> >();
+        } else {
+          value.push_back(service->second.as<string>());
+        }
+        nmt.insert(Netmask("0.0.0.0/0")).second.assign(value.begin(),value.end());
+        nmt.insert(Netmask("::/0")).second.swap(value);
+      }
+
+      dom.services[srvName].netmask4 = netmask4;
+      dom.services[srvName].netmask6 = netmask6;
+      dom.services[srvName].masks.swap(nmt);
     }
 
     // rectify the zone, first static records
@@ -126,16 +220,17 @@ void GeoIPBackend::initialize() {
       // ensure we have parent in records
       DNSName name = item.first;
       while(name.chopOff() && name.isPartOf(dom.domain)) {
-        if (dom.records.find(name) == dom.records.end()) {
-          DNSResourceRecord rr;
-          vector<DNSResourceRecord> rrs;
+        if (dom.records.find(name) == dom.records.end() && !dom.services.count(name)) { // don't ENT out a service!
+          GeoIPDNSResourceRecord rr;
+          vector<GeoIPDNSResourceRecord> rrs;
           rr.domain_id = dom.id;
           rr.ttl = dom.ttl;
           rr.qname = name;
-          rr.qtype = "NULL";
+          rr.qtype = QType(0); // empty non terminal
           rr.content = "";
           rr.auth = 1;
-          rr.d_place = DNSResourceRecord::ANSWER;
+          rr.weight = 100;
+          rr.has_weight = false;
           rrs.push_back(rr);
           std::swap(dom.records[name], rrs);
         }
@@ -148,78 +243,122 @@ void GeoIPBackend::initialize() {
       DNSName name = item.first;
       while(name.chopOff() && name.isPartOf(dom.domain)) {
         if (dom.records.find(name) == dom.records.end()) {
-          DNSResourceRecord rr;
-          vector<DNSResourceRecord> rrs;
+          GeoIPDNSResourceRecord rr;
+          vector<GeoIPDNSResourceRecord> rrs;
           rr.domain_id = dom.id;
           rr.ttl = dom.ttl;
           rr.qname = name;
-          rr.qtype = "NULL";
+          rr.qtype = QType(0);
           rr.content = "";
           rr.auth = 1;
-          rr.d_place = DNSResourceRecord::ANSWER;
+          rr.weight = 100;
+          rr.has_weight = false;
           rrs.push_back(rr);
           std::swap(dom.records[name], rrs);
         }
       }
     }
 
-    tmp_domains.push_back(dom);
+    // finally fix weights
+    for(auto &item: dom.records) {
+      float weight=0;
+      float sum=0;
+      bool has_weight=false;
+      // first we look for used weight
+      for(const auto &rr: item.second) {
+        weight+=rr.weight;
+        if (rr.has_weight) has_weight = true;
+      }
+      if (has_weight) {
+        // put them back as probabilities and values..
+        for(auto &rr: item.second) {
+          rr.weight=static_cast<int>((static_cast<float>(rr.weight) / weight)*1000.0);
+          sum += rr.weight;
+          rr.has_weight = has_weight;
+        }
+        // remove rounding gap
+        if (sum < 1000)
+          item.second.back().weight += (1000-sum);
+      }
+    }
+
+    tmp_domains.push_back(std::move(dom));
   }
 
   s_domains.clear();
   std::swap(s_domains, tmp_domains);
+
+  extern std::function<std::string(const std::string& ip, int)> g_getGeo;
+  g_getGeo = getGeoForLua;
 }
 
 GeoIPBackend::~GeoIPBackend() {
-  WriteLock wl(&s_state_lock);
-  s_rc--;
-  if (s_rc == 0) { // last instance gets to cleanup
-    if (s_gi)
-      GeoIP_delete(s_gi);
-    if (s_gi6)
-      GeoIP_delete(s_gi6);
-    s_gi = NULL;
-    s_gi6 = NULL;
-    s_domains.clear();
+  try {
+    WriteLock wl(&s_state_lock);
+    s_rc--;
+    if (s_rc == 0) { // last instance gets to cleanup
+      s_geoip_files.clear();
+      s_domains.clear();
+    }
+  }
+  catch(...) {
   }
 }
 
+bool GeoIPBackend::lookup_static(const GeoIPDomain &dom, const DNSName &search, const QType &qtype, const DNSName& qdomain, const std::string &ip, GeoIPNetmask &gl, bool v6) {
+  const auto& i = dom.records.find(search);
+  int cumul_probability = 0;
+  int probability_rnd = 1+(dns_random(1000)); // setting probability=0 means it never is used
+
+  if (i != dom.records.end()) { // return static value
+    for(const auto& rr : i->second) {
+      if (rr.has_weight) {
+        gl.netmask = (v6?128:32);
+        int comp = cumul_probability;
+        cumul_probability += rr.weight;
+        if (rr.weight == 0 || probability_rnd < comp || probability_rnd > (comp + rr.weight))
+          continue;
+      }
+      if (qtype == QType::ANY || rr.qtype == qtype) {
+        const string& content = format2str(rr.content, ip, v6, gl);
+        if (rr.qtype != QType::ENT && rr.qtype != QType::TXT && content.empty()) continue;
+        d_result.push_back(rr);
+        d_result.back().content = content;
+        d_result.back().qname = qdomain;
+      }
+    }
+    // ensure we get most strict netmask
+    for(DNSResourceRecord& rr: d_result) {
+      rr.scopeMask = gl.netmask;
+    }
+    return true; // no need to go further
+  }
+
+  return false;
+};
+
 void GeoIPBackend::lookup(const QType &qtype, const DNSName& qdomain, DNSPacket *pkt_p, int zoneId) {
   ReadLock rl(&s_state_lock);
-  GeoIPDomain dom;
+  const GeoIPDomain* dom;
+  GeoIPNetmask gl;
   bool found = false;
 
-  //cerr << qtype.getName() << " " << qdomain << " " << zoneId << std::endl;
-
-  if (d_result.size()>0) 
+  if (d_result.size()>0)
     throw PDNSException("Cannot perform lookup while another is running");
-
-  DNSName search = qdomain;
 
   d_result.clear();
 
-  if (zoneId > -1 && zoneId < static_cast<int>(s_domains.size())) 
-    dom = s_domains[zoneId];
+  if (zoneId > -1 && zoneId < static_cast<int>(s_domains.size()))
+    dom = &(s_domains[zoneId]);
   else {
-    BOOST_FOREACH(GeoIPDomain i, s_domains) {
-      if (search.isPartOf(i.domain)) {
-        dom = i;
+    for(const GeoIPDomain& i : s_domains) {   // this is arguably wrong, we should probably find the most specific match
+      if (qdomain.isPartOf(i.domain)) {
+        dom = &i;
         found = true;
         break;
       }
     }
     if (!found) return; // not found
-  }
-
-  if (dom.records.count(search)) { // return static value
-    map<DNSName, vector<DNSResourceRecord> >::iterator i = dom.records.find(search);
-    BOOST_FOREACH(DNSResourceRecord rr, i->second) {
-      if (qtype == QType::ANY || rr.qtype == qtype) {
-        d_result.push_back(rr);
-        d_result.back().qname = qdomain;
-      }
-    }
-    return;
   }
 
   string ip = "0.0.0.0";
@@ -229,35 +368,65 @@ void GeoIPBackend::lookup(const QType &qtype, const DNSName& qdomain, DNSPacket 
     v6 = pkt_p->getRealRemote().isIpv6();
   }
 
-  if (dom.services.count(search) == 0) return; // no hit
-  map<DNSName, string>::const_iterator target = dom.services.find(search);
-  string format = target->second;
-  
-  format = format2str(format, ip, v6);
+  gl.netmask = 0;
 
-  // see if the record can be found
-  if (dom.records.count(DNSName(format))) { // return static value
-    map<DNSName, vector<DNSResourceRecord> >::iterator i = dom.records.find(DNSName(format));
-    BOOST_FOREACH(DNSResourceRecord rr, i->second) {
-      if (qtype == QType::ANY || rr.qtype == qtype) {
-        rr.scopeMask = (v6 ? 128 : 32);
-        d_result.push_back(rr);
-        d_result.back().qname = qdomain;
-      }
+  (void)this->lookup_static(*dom, qdomain, qtype, qdomain, ip, gl, v6);
+
+  const auto& target = (*dom).services.find(qdomain);
+  if (target == (*dom).services.end()) return; // no hit
+
+  const NetmaskTree<vector<string> >::node_type* node = target->second.masks.lookup(ComboAddress(ip));
+  if (node == NULL) return; // no hit, again.
+
+  DNSName sformat;
+  gl.netmask = node->first.getBits();
+  // figure out smallest sensible netmask
+  if (gl.netmask == 0) {
+    GeoIPNetmask tmp_gl;
+    tmp_gl.netmask = 0;
+    // get netmask from geoip backend
+    if (queryGeoIP(ip, v6, GeoIPInterface::Name, tmp_gl) == "unknown") {
+      if (v6)
+        gl.netmask = target->second.netmask6;
+      else
+        gl.netmask = target->second.netmask4;
     }
+  } else {
+    if (v6)
+      gl.netmask = target->second.netmask6;
+    else
+      gl.netmask = target->second.netmask4;
+  }
+
+  // note that this means the array format won't work with indirect
+  for(auto it = node->second.begin(); it != node->second.end(); it++) {
+    sformat = DNSName(format2str(*it, ip, v6, gl));
+
+    // see if the record can be found
+    if (this->lookup_static((*dom), sformat, qtype, qdomain, ip, gl, v6))
+      return;
+  }
+
+  if (!d_result.empty()) {
+    g_log<<Logger::Error<<
+       "Cannot have static record and CNAME at the same time." <<
+       "Please fix your configuration for \"" << qdomain << "\", so that " <<
+       "it can be resolved by GeoIP backend directly."<< std::endl;
+    d_result.clear();
     return;
   }
 
+  // we need this line since we otherwise claim to have NS records etc
   if (!(qtype == QType::ANY || qtype == QType::CNAME)) return;
 
   DNSResourceRecord rr;
-  rr.domain_id = dom.id;
+  rr.domain_id = dom->id;
   rr.qtype = QType::CNAME;
   rr.qname = qdomain;
-  rr.content = format;
+  rr.content = sformat.toString();
   rr.auth = 1;
-  rr.ttl = dom.ttl;
-  rr.scopeMask = (v6 ? 128 : 32);
+  rr.ttl = dom->ttl;
+  rr.scopeMask = gl.netmask;
   d_result.push_back(rr);
 }
 
@@ -267,161 +436,233 @@ bool GeoIPBackend::get(DNSResourceRecord &r) {
   r = d_result.back();
   d_result.pop_back();
 
-  //cerr << "get " << r.qname << " IN " << r.qtype.getName() << " " << r.content << endl;
-
   return true;
 }
 
-string GeoIPBackend::queryGeoIP(const string &ip, bool v6, GeoIPQueryAttribute attribute) {
+static string queryGeoIP(const string &ip, bool v6, GeoIPInterface::GeoIPQueryAttribute attribute, GeoIPNetmask& gl) {
   string ret = "unknown";
-  const char *val = NULL;
-  GeoIPRegion *gir = NULL;
-  GeoIPRecord *gir2 = NULL;
-  int id;
 
+  for(auto const& gi: s_geoip_files) {
+    string val;
+    bool found = false;
 
-  if (v6 && s_gi6) {
-    if (attribute == Afi) {
-      return "v6";
-    } else if (d_dbmode == GEOIP_ISP_EDITION_V6 || d_dbmode == GEOIP_ORG_EDITION_V6) {
-      if (attribute == Name) {
-        val = GeoIP_name_by_addr_v6(s_gi6, ip.c_str());
-      }
-    } else if (d_dbmode == GEOIP_COUNTRY_EDITION_V6 ||
-        d_dbmode == GEOIP_LARGE_COUNTRY_EDITION_V6 ||
-        d_dbmode == GEOIP_COUNTRY_EDITION) {
-      id = GeoIP_id_by_addr_v6(s_gi6, ip.c_str());
-      if (attribute == Country) {
-        val = GeoIP_code3_by_id(id);
-      } else if (attribute == Continent) {
-        val = GeoIP_continent_by_id(id);
-      }
-    } else if (d_dbmode == GEOIP_REGION_EDITION_REV0 ||
-        d_dbmode == GEOIP_REGION_EDITION_REV1) {
-      gir = GeoIP_region_by_addr_v6(s_gi6, ip.c_str());
-      if (gir) {
-        if (attribute == Country) {
-          id = GeoIP_id_by_code(gir->country_code);
-          val = GeoIP_code3_by_id(id);
-        } else if (attribute == Region) {
-          val = gir->region;
-        } else if (attribute == Continent) {
-          id = GeoIP_id_by_code(gir->country_code);
-          val = GeoIP_continent_by_id(id);
-        }
-      }
-    } else if (d_dbmode == GEOIP_CITY_EDITION_REV0_V6 ||
-               d_dbmode == GEOIP_CITY_EDITION_REV1_V6) {
-      gir2 = GeoIP_record_by_addr_v6(s_gi6, ip.c_str());
-      if (gir2) {
-        if (attribute == Country) {
-          val = gir2->country_code3;
-        } else if (attribute == Region) {
-          val = gir2->region;
-        } else if (attribute == Continent) {
-          id = GeoIP_id_by_code(gir2->country_code);
-          val = GeoIP_continent_by_id(id);
-        } else if (attribute == City) {
-          val = gir2->city;
-        }
-      }
+    switch(attribute) {
+    case GeoIPInterface::ASn:
+      if (v6) found = gi->queryASnumV6(val, gl, ip);
+      else found =gi->queryASnum(val, gl, ip);
+      break;
+    case GeoIPInterface::Name:
+      if (v6) found = gi->queryNameV6(val, gl, ip);
+      else found = gi->queryName(val, gl, ip);
+      break;
+    case GeoIPInterface::Continent:
+      if (v6) found = gi->queryContinentV6(val, gl, ip);
+      else found = gi->queryContinent(val, gl, ip);
+      break;
+    case GeoIPInterface::Region:
+      if (v6) found = gi->queryRegionV6(val, gl, ip);
+      else found = gi->queryRegion(val, gl, ip);
+      break;
+    case GeoIPInterface::Country:
+      if (v6) found = gi->queryCountryV6(val, gl, ip);
+      else found = gi->queryCountry(val, gl, ip);
+      break;
+    case GeoIPInterface::Country2:
+      if (v6) found = gi->queryCountry2V6(val, gl, ip);
+      else found = gi->queryCountry2(val, gl, ip);
+      break;
+    case GeoIPInterface::City:
+      if (v6) found = gi->queryCityV6(val, gl, ip);
+      else found = gi->queryCity(val, gl, ip);
+      break;
+    case GeoIPInterface::Location:
+      double lat=0, lon=0;
+      boost::optional<int> alt, prec;
+      if (v6) found = gi->queryLocationV6(gl, ip, lat, lon, alt, prec);
+      else found = gi->queryLocation(gl, ip, lat, lon, alt, prec);
+      val = std::to_string(lat)+" "+std::to_string(lon);
+      break;
     }
-  } else if (!v6 && s_gi) {
-    if (attribute == Afi) {
-      return "v4";
-    } else if (d_dbmode == GEOIP_ISP_EDITION || d_dbmode == GEOIP_ORG_EDITION) {
-      if (attribute == Name) {
-        val = GeoIP_name_by_addr_v6(s_gi, ip.c_str());
-      }
-    } else if (d_dbmode == GEOIP_COUNTRY_EDITION ||
-        d_dbmode == GEOIP_LARGE_COUNTRY_EDITION) {
-      id = GeoIP_id_by_addr(s_gi, ip.c_str());
-      if (attribute == Country) {
-        val = GeoIP_code3_by_id(id);
-      } else if (attribute == Continent) {
-        val = GeoIP_continent_by_id(id);
-      }
-    } else if (d_dbmode == GEOIP_REGION_EDITION_REV0 ||
-        d_dbmode == GEOIP_REGION_EDITION_REV1) {
-      gir = GeoIP_region_by_addr(s_gi, ip.c_str());
-      if (gir) {
-        if (attribute == Country) {
-          id = GeoIP_id_by_code(gir->country_code);
-          val = GeoIP_code3_by_id(id);
-        } else if (attribute == Region) {
-          val = gir->region;
-        } else if (attribute == Continent) {
-          id = GeoIP_id_by_code(gir->country_code);
-          val = GeoIP_continent_by_id(id);
-        }
-      }
-    } else if (d_dbmode == GEOIP_CITY_EDITION_REV0 ||
-               d_dbmode == GEOIP_CITY_EDITION_REV1) {
-      gir2 = GeoIP_record_by_addr(s_gi, ip.c_str());
-      if (gir2) {
-        if (attribute == Country) {
-          val = gir2->country_code3;
-        } else if (attribute == Region) {
-          val = gir2->region;
-        } else if (attribute == Continent) {
-          id = GeoIP_id_by_code(gir2->country_code);
-          val = GeoIP_continent_by_id(id);
-        } else if (attribute == City) {
-          val = gir2->city;
-        }
-      }
-    }
-  }
-  if (val) {
+
+    if (!found || val.empty() || val == "--") continue; // try next database
     ret = val;
-    if (ret == "--") ret = "unknown";
     std::transform(ret.begin(), ret.end(), ret.begin(), ::tolower);
+    break;
   }
+
+  if (ret == "unknown") gl.netmask = (v6?128:32); // prevent caching
   return ret;
 }
 
-string GeoIPBackend::format2str(string format, const string& ip, bool v6) {
+string getGeoForLua(const std::string& ip, int qaint)
+{
+  GeoIPInterface::GeoIPQueryAttribute qa((GeoIPInterface::GeoIPQueryAttribute)qaint);
+  try {
+    GeoIPNetmask gl;
+    string res=queryGeoIP(ip, false, qa, gl);
+    //    cout<<"Result for "<<ip<<" lookup: "<<res<<endl;
+    if(qa==GeoIPInterface::ASn && boost::starts_with(res, "as"))
+      return res.substr(2);
+    return res;
+  }
+  catch(std::exception& e) {
+    cout<<"Error: "<<e.what()<<endl;
+  }
+  catch(PDNSException& e) {
+    cout<<"Error: "<<e.reason<<endl;
+  }
+  return "";
+}
+
+bool queryGeoLocation(const string &ip, bool v6, GeoIPNetmask& gl, double& lat, double& lon,
+                      boost::optional<int>& alt, boost::optional<int>& prec)
+{
+  for(auto const& gi: s_geoip_files) {
+    string val;
+    if (v6) {
+      if (gi->queryLocationV6(gl, ip, lat, lon, alt, prec))
+        return true;
+     } else if (gi->queryLocation(gl, ip, lat, lon, alt, prec))
+        return true;
+  }
+  return false;
+}
+
+string GeoIPBackend::format2str(string sformat, const string& ip, bool v6, GeoIPNetmask& gl) {
   string::size_type cur,last;
-  GeoIPQueryAttribute attr;
+  boost::optional<int> alt, prec;
+  double lat, lon;
+  time_t t = time((time_t*)NULL);
+  GeoIPNetmask tmp_gl; // largest wins
+  struct tm gtm;
+  gmtime_r(&t, &gtm);
   last=0;
-  while((cur = format.find("%", last)) != string::npos) {
-    if (!format.compare(cur,3,"%co")) {
-      attr = Country;
-    } else if (!format.compare(cur,3,"%cn")) {
-      attr = Continent;
-    } else if (!format.compare(cur,3,"%af")) {
-      attr = Afi;
-    } else if (!format.compare(cur,3,"%re")) {
-      attr = Region;
-    } else if (!format.compare(cur,3,"%na")) {
-      attr = Name;
-    } else if (!format.compare(cur,3,"%ci")) {
-      attr = City;
-    } else if (!format.compare(cur,2,"%%")) {
-      last = cur + 2; continue; 
-    } else { 
-      last = cur + 1; continue; 
+
+  while((cur = sformat.find("%", last)) != string::npos) {
+    string rep;
+    int nrep=3;
+    tmp_gl.netmask = 0;
+    if (!sformat.compare(cur,3,"%cn")) {
+      rep = queryGeoIP(ip, v6, GeoIPInterface::Continent, tmp_gl);
+    } else if (!sformat.compare(cur,3,"%co")) {
+      rep = queryGeoIP(ip, v6, GeoIPInterface::Country, tmp_gl);
+    } else if (!sformat.compare(cur,3,"%cc")) {
+      rep = queryGeoIP(ip, v6, GeoIPInterface::Country2, tmp_gl);
+    } else if (!sformat.compare(cur,3,"%af")) {
+      rep = (v6?"v6":"v4");
+    } else if (!sformat.compare(cur,3,"%as")) {
+      rep = queryGeoIP(ip, v6, GeoIPInterface::ASn, tmp_gl);
+    } else if (!sformat.compare(cur,3,"%re")) {
+      rep = queryGeoIP(ip, v6, GeoIPInterface::Region, tmp_gl);
+    } else if (!sformat.compare(cur,3,"%na")) {
+      rep = queryGeoIP(ip, v6, GeoIPInterface::Name, tmp_gl);
+    } else if (!sformat.compare(cur,3,"%ci")) {
+      rep = queryGeoIP(ip, v6, GeoIPInterface::City, tmp_gl);
+    } else if (!sformat.compare(cur,4,"%loc")) {
+      char ns, ew;
+      int d1, d2, m1, m2;
+      double s1, s2;
+      if (!queryGeoLocation(ip, v6, gl, lat, lon, alt, prec)) {
+        rep = "";
+      } else {
+        ns = (lat>0) ? 'N' : 'S';
+        ew = (lon>0) ? 'E' : 'W';
+        /* remove sign */
+        lat = fabs(lat);
+        lon = fabs(lon);
+        d1 = static_cast<int>(lat);
+        d2 = static_cast<int>(lon);
+        m1 = static_cast<int>((lat - d1)*60.0);
+        m2 = static_cast<int>((lon - d2)*60.0);
+        s1 = static_cast<double>(lat - d1 - m1/60.0)*3600.0;
+        s2 = static_cast<double>(lon - d2 - m2/60.0)*3600.0;
+        rep = str(boost::format("%d %d %0.3f %c %d %d %0.3f %c") %
+                                d1 % m1 % s1 % ns % d2 % m2 % s2 % ew);
+        if (alt)
+          rep = rep + str(boost::format(" %d.00") % *alt);
+        else
+          rep = rep + string(" 0.00");
+        if (prec)
+          rep = rep + str(boost::format(" %dm") % *prec);
+      }
+      nrep = 4;
+    } else if (!sformat.compare(cur,4,"%lat")) {
+      if (!queryGeoLocation(ip, v6, gl, lat, lon, alt, prec)) {
+        rep = "";
+      } else {
+        rep = str(boost::format("%lf") % lat);
+      }
+      nrep = 4;
+    } else if (!sformat.compare(cur,4,"%lon")) {
+      if (!queryGeoLocation(ip, v6, gl, lat, lon, alt, prec)) {
+        rep = "";
+      } else {
+        rep = str(boost::format("%lf") % lon);
+      }
+      nrep = 4;
+    } else if (!sformat.compare(cur,3,"%hh")) {
+      rep = boost::str(boost::format("%02d") % gtm.tm_hour);
+      tmp_gl.netmask = (v6?128:32);
+    } else if (!sformat.compare(cur,3,"%yy")) {
+      rep = boost::str(boost::format("%02d") % (gtm.tm_year + 1900));
+      tmp_gl.netmask = (v6?128:32);
+    } else if (!sformat.compare(cur,3,"%dd")) {
+      rep = boost::str(boost::format("%02d") % (gtm.tm_yday + 1));
+      tmp_gl.netmask = (v6?128:32);
+    } else if (!sformat.compare(cur,4,"%wds")) {
+      nrep=4;
+      rep = GeoIP_WEEKDAYS[gtm.tm_wday];
+      tmp_gl.netmask = (v6?128:32);
+    } else if (!sformat.compare(cur,4,"%mos")) {
+      nrep=4;
+      rep = GeoIP_MONTHS[gtm.tm_mon];
+      tmp_gl.netmask = (v6?128:32);
+    } else if (!sformat.compare(cur,3,"%wd")) {
+      rep = boost::str(boost::format("%02d") % (gtm.tm_wday + 1));
+      tmp_gl.netmask = (v6?128:32);
+    } else if (!sformat.compare(cur,3,"%mo")) {
+      rep = boost::str(boost::format("%02d") % (gtm.tm_mon + 1));
+      tmp_gl.netmask = (v6?128:32);
+    } else if (!sformat.compare(cur,4,"%ip6")) {
+      nrep = 4;
+      if (v6)
+        rep = ip;
+      else
+        rep = "";
+      tmp_gl.netmask = (v6?128:32);
+    } else if (!sformat.compare(cur,4,"%ip4")) {
+      nrep = 4;
+      if (!v6)
+        rep = ip;
+      else
+        rep = "";
+      tmp_gl.netmask = (v6?128:32);
+    } else if (!sformat.compare(cur,3,"%ip")) {
+      rep = ip;
+      tmp_gl.netmask = (v6?128:32);
+    } else if (!sformat.compare(cur,2,"%%")) {
+      last = cur + 2; continue;
+    } else {
+      last = cur + 1; continue;
     }
-
-    string rep = queryGeoIP(ip, v6, attr);
-
-    format.replace(cur, 3, rep);
+    if (tmp_gl.netmask > gl.netmask) gl.netmask = tmp_gl.netmask;
+    sformat.replace(cur, nrep, rep);
     last = cur + rep.size(); // move to next attribute
   }
-  return format;
+  return sformat;
 }
 
 void GeoIPBackend::reload() {
   WriteLock wl(&s_state_lock);
-  
+
   try {
     initialize();
   } catch (PDNSException &pex) {
-    L<<Logger::Error<<"GeoIP backend reload failed: " << pex.reason << endl;
+    g_log<<Logger::Error<<"GeoIP backend reload failed: " << pex.reason << endl;
   } catch (std::exception &stex) {
-    L<<Logger::Error<<"GeoIP backend reload failed: " << stex.what() << endl;
+    g_log<<Logger::Error<<"GeoIP backend reload failed: " << stex.what() << endl;
   } catch (...) {
-    L<<Logger::Error<<"GeoIP backend reload failed" << endl;
+    g_log<<Logger::Error<<"GeoIP backend reload failed" << endl;
   }
 }
 
@@ -429,10 +670,10 @@ void GeoIPBackend::rediscover(string* status) {
   reload();
 }
 
-bool GeoIPBackend::getDomainInfo(const DNSName& domain, DomainInfo &di) {
+bool GeoIPBackend::getDomainInfo(const DNSName& domain, DomainInfo &di, bool getSerial) {
   ReadLock rl(&s_state_lock);
 
-  BOOST_FOREACH(GeoIPDomain dom, s_domains) {
+  for(GeoIPDomain dom :  s_domains) {
     if (dom.domain == domain) {
       SOAData sd;
       this->getSOA(domain, sd);
@@ -451,7 +692,7 @@ bool GeoIPBackend::getAllDomainMetadata(const DNSName& name, std::map<std::strin
   if (!d_dnssec) return false;
 
   ReadLock rl(&s_state_lock);
-  BOOST_FOREACH(GeoIPDomain dom, s_domains) {
+  for(GeoIPDomain dom :  s_domains) {
     if (dom.domain == name) {
       if (hasDNSSECkey(dom.domain)) {
         meta[string("NSEC3NARROW")].push_back("1");
@@ -467,7 +708,7 @@ bool GeoIPBackend::getDomainMetadata(const DNSName& name, const std::string& kin
   if (!d_dnssec) return false;
 
   ReadLock rl(&s_state_lock);
-  BOOST_FOREACH(GeoIPDomain dom, s_domains) {
+  for(GeoIPDomain dom :  s_domains) {
     if (dom.domain == name) {
       if (hasDNSSECkey(dom.domain)) {
         if (kind == "NSEC3NARROW")
@@ -481,10 +722,10 @@ bool GeoIPBackend::getDomainMetadata(const DNSName& name, const std::string& kin
   return false;
 }
 
-bool GeoIPBackend::getDomainKeys(const DNSName& name, unsigned int kind, std::vector<DNSBackend::KeyData>& keys) {
+bool GeoIPBackend::getDomainKeys(const DNSName& name, std::vector<DNSBackend::KeyData>& keys) {
   if (!d_dnssec) return false;
   ReadLock rl(&s_state_lock);
-  BOOST_FOREACH(GeoIPDomain dom, s_domains) {
+  for(GeoIPDomain dom :  s_domains) {
     if (dom.domain == name) {
       regex_t reg;
       regmatch_t regm[5];
@@ -496,9 +737,9 @@ bool GeoIPBackend::getDomainKeys(const DNSName& name, unsigned int kind, std::ve
         for(size_t i=0;i<glob_result.gl_pathc;i++) {
           if (regexec(&reg, glob_result.gl_pathv[i], 5, regm, 0) == 0) {
             DNSBackend::KeyData kd;
-            kd.id = atoi(glob_result.gl_pathv[i]+regm[3].rm_so);
-            kd.active = atoi(glob_result.gl_pathv[i]+regm[4].rm_so);
-            kd.flags = atoi(glob_result.gl_pathv[i]+regm[2].rm_so);
+            kd.id = pdns_stou(glob_result.gl_pathv[i]+regm[3].rm_so);
+            kd.active = !strncmp(glob_result.gl_pathv[i]+regm[4].rm_so, "1", 1);
+            kd.flags = pdns_stou(glob_result.gl_pathv[i]+regm[2].rm_so);
             ifstream ifs(glob_result.gl_pathv[i]);
             ostringstream content;
             char buffer[1024];
@@ -527,7 +768,7 @@ bool GeoIPBackend::removeDomainKey(const DNSName& name, unsigned int id) {
   WriteLock rl(&s_state_lock);
   ostringstream path;
 
-  BOOST_FOREACH(GeoIPDomain dom, s_domains) {
+  for(GeoIPDomain dom :  s_domains) {
     if (dom.domain == name) {
       regex_t reg;
       regmatch_t regm[5];
@@ -538,7 +779,7 @@ bool GeoIPBackend::removeDomainKey(const DNSName& name, unsigned int id) {
       if (glob(pathname.str().c_str(),GLOB_ERR,NULL,&glob_result) == 0) {
         for(size_t i=0;i<glob_result.gl_pathc;i++) {
           if (regexec(&reg, glob_result.gl_pathv[i], 5, regm, 0) == 0) {
-            unsigned int kid = atoi(glob_result.gl_pathv[i]+regm[3].rm_so);
+            unsigned int kid = pdns_stou(glob_result.gl_pathv[i]+regm[3].rm_so);
             if (kid == id) {
               if (unlink(glob_result.gl_pathv[i])) {
                 cerr << "Cannot delete key:" << strerror(errno) << endl;
@@ -556,12 +797,12 @@ bool GeoIPBackend::removeDomainKey(const DNSName& name, unsigned int id) {
   return false;
 }
 
-int GeoIPBackend::addDomainKey(const DNSName& name, const KeyData& key) {
+bool GeoIPBackend::addDomainKey(const DNSName& name, const KeyData& key, int64_t& id) {
   if (!d_dnssec) return false;
   WriteLock rl(&s_state_lock);
-  int nextid=1;
+  unsigned int nextid=1;
 
-  BOOST_FOREACH(GeoIPDomain dom, s_domains) {
+  for(GeoIPDomain dom :  s_domains) {
     if (dom.domain == name) {
       regex_t reg;
       regmatch_t regm[5];
@@ -572,7 +813,7 @@ int GeoIPBackend::addDomainKey(const DNSName& name, const KeyData& key) {
       if (glob(pathname.str().c_str(),GLOB_ERR,NULL,&glob_result) == 0) {
         for(size_t i=0;i<glob_result.gl_pathc;i++) {
           if (regexec(&reg, glob_result.gl_pathv[i], 5, regm, 0) == 0) {
-            int kid = atoi(glob_result.gl_pathv[i]+regm[3].rm_so);
+            unsigned int kid = pdns_stou(glob_result.gl_pathv[i]+regm[3].rm_so);
             if (kid >= nextid) nextid = kid+1;
           }
         }
@@ -584,7 +825,8 @@ int GeoIPBackend::addDomainKey(const DNSName& name, const KeyData& key) {
       ofstream ofs(pathname.str().c_str());
       ofs.write(key.content.c_str(), key.content.size());
       ofs.close();
-      return nextid;
+      id = nextid;
+      return true;
     }
   }
   return false;
@@ -594,7 +836,7 @@ int GeoIPBackend::addDomainKey(const DNSName& name, const KeyData& key) {
 bool GeoIPBackend::activateDomainKey(const DNSName& name, unsigned int id) {
   if (!d_dnssec) return false;
   WriteLock rl(&s_state_lock);
-  BOOST_FOREACH(GeoIPDomain dom, s_domains) {
+  for(GeoIPDomain dom :  s_domains) {
     if (dom.domain == name) {
       regex_t reg;
       regmatch_t regm[5];
@@ -605,10 +847,10 @@ bool GeoIPBackend::activateDomainKey(const DNSName& name, unsigned int id) {
       if (glob(pathname.str().c_str(),GLOB_ERR,NULL,&glob_result) == 0) {
         for(size_t i=0;i<glob_result.gl_pathc;i++) {
           if (regexec(&reg, glob_result.gl_pathv[i], 5, regm, 0) == 0) {
-            unsigned int kid = atoi(glob_result.gl_pathv[i]+regm[3].rm_so);
-            if (kid == id && atoi(glob_result.gl_pathv[i]+regm[4].rm_so) == 0) {
-              ostringstream newpath; 
-              newpath << getArg("dnssec-keydir") << "/" << dom.domain.toStringNoDot() << "." << atoi(glob_result.gl_pathv[i]+regm[2].rm_so) << "." << kid << ".1.key";
+            unsigned int kid = pdns_stou(glob_result.gl_pathv[i]+regm[3].rm_so);
+            if (kid == id && !strcmp(glob_result.gl_pathv[i]+regm[4].rm_so,"0")) {
+              ostringstream newpath;
+              newpath << getArg("dnssec-keydir") << "/" << dom.domain.toStringNoDot() << "." << pdns_stou(glob_result.gl_pathv[i]+regm[2].rm_so) << "." << kid << ".1.key";
               if (rename(glob_result.gl_pathv[i], newpath.str().c_str())) {
                 cerr << "Cannot active key: " << strerror(errno) << endl;
               }
@@ -617,7 +859,7 @@ bool GeoIPBackend::activateDomainKey(const DNSName& name, unsigned int id) {
         }
       }
       globfree(&glob_result);
-      regfree(&reg); 
+      regfree(&reg);
       return true;
     }
   }
@@ -627,7 +869,7 @@ bool GeoIPBackend::activateDomainKey(const DNSName& name, unsigned int id) {
 bool GeoIPBackend::deactivateDomainKey(const DNSName& name, unsigned int id) {
   if (!d_dnssec) return false;
   WriteLock rl(&s_state_lock);
-  BOOST_FOREACH(GeoIPDomain dom, s_domains) {
+  for(GeoIPDomain dom :  s_domains) {
     if (dom.domain == name) {
       regex_t reg;
       regmatch_t regm[5];
@@ -638,12 +880,12 @@ bool GeoIPBackend::deactivateDomainKey(const DNSName& name, unsigned int id) {
       if (glob(pathname.str().c_str(),GLOB_ERR,NULL,&glob_result) == 0) {
         for(size_t i=0;i<glob_result.gl_pathc;i++) {
           if (regexec(&reg, glob_result.gl_pathv[i], 5, regm, 0) == 0) {
-            unsigned int kid = atoi(glob_result.gl_pathv[i]+regm[3].rm_so);
-            if (kid == id && atoi(glob_result.gl_pathv[i]+regm[4].rm_so) == 1) {
+            unsigned int kid = pdns_stou(glob_result.gl_pathv[i]+regm[3].rm_so);
+            if (kid == id && !strcmp(glob_result.gl_pathv[i]+regm[4].rm_so,"1")) {
               ostringstream newpath;
-              newpath << getArg("dnssec-keydir") << "/" << dom.domain.toStringNoDot() << "." << atoi(glob_result.gl_pathv[i]+regm[2].rm_so) << "." << kid << ".0.key";
+              newpath << getArg("dnssec-keydir") << "/" << dom.domain.toStringNoDot() << "." << pdns_stou(glob_result.gl_pathv[i]+regm[2].rm_so) << "." << kid << ".0.key";
               if (rename(glob_result.gl_pathv[i], newpath.str().c_str())) {
-                cerr << "Cannot deactive key: " << strerror(errno) << endl;
+                cerr << "Cannot deactivate key: " << strerror(errno) << endl;
               }
             }
           }
@@ -674,9 +916,7 @@ public:
 
   void declareArguments(const string &suffix = "") {
     declare(suffix, "zones-file", "YAML file to load zone(s) configuration", "");
-    declare(suffix, "database-file6", "File to load IPv6 geoip data from", "/usr/share/GeoIP/GeoIPv6.dat");
-    declare(suffix, "database-file", "File to load IPv4 geoip data from", "/usr/share/GeoIP/GeoIP.dat");
-    declare(suffix, "database-cache", "Cache mode (standard, memory, index, mmap)", "standard");
+    declare(suffix, "database-files", "File(s) to load geoip data from ([driver:]path[;opt=value]", "");
     declare(suffix, "dnssec-keydir", "Directory to hold dnssec keys (also turns DNSSEC on)", "");
   }
 
@@ -689,7 +929,7 @@ class GeoIPLoader {
 public:
   GeoIPLoader() {
     BackendMakers().report(new GeoIPFactory);
-    L << Logger::Info << "[geobackend] This is the geo backend version " VERSION
+    g_log << Logger::Info << "[geoipbackend] This is the geoip backend version " VERSION
 #ifndef REPRODUCIBLE
       << " (" __DATE__ " " __TIME__ ")"
 #endif
@@ -697,4 +937,4 @@ public:
   }
 };
 
-static GeoIPLoader geoloader;
+static GeoIPLoader geoiploader;

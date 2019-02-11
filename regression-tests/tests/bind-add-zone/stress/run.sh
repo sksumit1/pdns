@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -e
-set -x
+if [ "${PDNS_DEBUG}" = "YES" ]; then
+  set -x
+fi
 
 PDNS=../pdns/pdns_server
 AMOUNT=${1:-1000}
@@ -88,8 +90,7 @@ grep '^host' example.com | grep -e 'IN\s*A' | \
 
 $PDNS --daemon=no --local-port=$port --socket-dir=./ \
       --no-shuffle --launch=bind --bind-config=./named.conf \
-      --fancy-records --send-root-referral \
-      --cache-ttl=0 --no-config &
+      --fancy-records --cache-ttl=0 --no-config &
 bindwait
 
 DNSPERF=$DNSPERF port=$port ./add-zone/stress/dnsperf.sh &

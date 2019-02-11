@@ -6,7 +6,7 @@
 #endif
 #include <boost/test/unit_test.hpp>
 #include <boost/assign/list_of.hpp>
-#include <boost/foreach.hpp>
+
 #include <boost/tuple/tuple.hpp>
 #include <stdint.h>
 #include "misc.hh"
@@ -17,7 +17,7 @@ using std::string;
 
 static void *threadMangler(void* a)
 {
-  AtomicCounter* ac = (AtomicCounter*)a;
+  AtomicCounter* ac=(AtomicCounter*)a;
   for(unsigned int n=0; n < 1000000; ++n)
     (*ac)++;
   return 0;
@@ -33,7 +33,7 @@ static void *threadMangler2(void* a)
 
 
 
-BOOST_AUTO_TEST_SUITE(misc_hh)
+BOOST_AUTO_TEST_SUITE(test_misc_hh)
 
 BOOST_AUTO_TEST_CASE(test_StatBagBasic) {
   StatBag s;
@@ -83,7 +83,7 @@ BOOST_AUTO_TEST_CASE(test_StatBagBasic) {
 
 #ifdef UINTPTR_MAX  
 #if UINTPTR_MAX > 0xffffffffULL
-    BOOST_CHECK_EQUAL(sizeof(AtomicCounter::native_t), 8);
+    BOOST_CHECK_EQUAL(sizeof(AtomicCounterInner), 8);
     s.set("c", 1ULL<<33);
     BOOST_CHECK_EQUAL(s.read("c"), (1ULL<<33) );
     s.inc("c");
@@ -94,7 +94,7 @@ BOOST_AUTO_TEST_CASE(test_StatBagBasic) {
     s.inc("c");
     BOOST_CHECK_EQUAL(s.read("c"), 0 );
 #else
-    BOOST_CHECK_EQUAL(sizeof(AtomicCounter::native_t), 4);
+    BOOST_CHECK_EQUAL(sizeof(AtomicCounterInner), 4);
     BOOST_CHECK_EQUAL(~0UL, 0xffffffffUL);
     s.set("c", ~0UL);
     BOOST_CHECK_EQUAL(s.read("c"), 0xffffffffUL );

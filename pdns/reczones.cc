@@ -1,25 +1,24 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2003 - 2010  PowerDNS.COM BV
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2 
-    as published by the Free Software Foundation
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
-
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -28,7 +27,7 @@
 #include "zoneparser-tng.hh"
 #include "logger.hh"
 #include "dnsrecords.hh"
-#include <boost/foreach.hpp>
+#include "root-addresses.hh"
 
 extern int g_argc;
 extern char** g_argv;
@@ -36,42 +35,36 @@ extern char** g_argv;
 void primeHints(void)
 {
   // prime root cache
+  const vState validationState = Insecure;
   vector<DNSRecord> nsset;
   if(!t_RC)
-    t_RC = new MemRecursorCache();
+    t_RC = std::unique_ptr<MemRecursorCache>(new MemRecursorCache());
 
   if(::arg()["hint-file"].empty()) {
-    static const char*ips[]={"198.41.0.4", "192.228.79.201", "192.33.4.12", "199.7.91.13", "192.203.230.10", "192.5.5.241", 
-                             "192.112.36.4", "128.63.2.53",
-                             "192.36.148.17","192.58.128.30", "193.0.14.129", "199.7.83.42", "202.12.27.33"};
-    static const char *ip6s[]={
-      "2001:503:ba3e::2:30", "2001:500:84::b", "2001:500:2::c", "2001:500:2d::d", NULL,
-      "2001:500:2f::f", NULL, "2001:500:1::803f:235", "2001:7fe::53",
-      "2001:503:c27::2:30", "2001:7fd::1", "2001:500:3::42", "2001:dc3::35"
-    };
-    
     DNSRecord arr, aaaarr, nsrr;
+    nsrr.d_name=g_rootdnsname;
     arr.d_type=QType::A;
     aaaarr.d_type=QType::AAAA;
     nsrr.d_type=QType::NS;
     arr.d_ttl=aaaarr.d_ttl=nsrr.d_ttl=time(0)+3600000;
     
     for(char c='a';c<='m';++c) {
-      static char templ[40];
+      char templ[40];
       strncpy(templ,"a.root-servers.net.", sizeof(templ) - 1);
+      templ[sizeof(templ)-1] = '\0';
       *templ=c;
       aaaarr.d_name=arr.d_name=DNSName(templ);
       nsrr.d_content=std::make_shared<NSRecordContent>(DNSName(templ));
-      arr.d_content=std::make_shared<ARecordContent>(ComboAddress(ips[c-'a']));
+      arr.d_content=std::make_shared<ARecordContent>(ComboAddress(rootIps4[c-'a']));
       vector<DNSRecord> aset;
       aset.push_back(arr);
-      t_RC->replace(time(0), DNSName(templ), QType(QType::A), aset, vector<std::shared_ptr<RRSIGRecordContent>>(), true); // auth, nuke it all
-      if (ip6s[c-'a'] != NULL) {
-        aaaarr.d_content=std::make_shared<AAAARecordContent>(ComboAddress(ip6s[c-'a']));
+      t_RC->replace(time(0), DNSName(templ), QType(QType::A), aset, vector<std::shared_ptr<RRSIGRecordContent>>(), vector<std::shared_ptr<DNSRecord>>(), true, boost::none, validationState); // auth, nuke it all
+      if (rootIps6[c-'a'] != NULL) {
+        aaaarr.d_content=std::make_shared<AAAARecordContent>(ComboAddress(rootIps6[c-'a']));
 
         vector<DNSRecord> aaaaset;
         aaaaset.push_back(aaaarr);
-        t_RC->replace(time(0), DNSName(templ), QType(QType::AAAA), aaaaset, vector<std::shared_ptr<RRSIGRecordContent>>(), true);
+        t_RC->replace(time(0), DNSName(templ), QType(QType::AAAA), aaaaset, vector<std::shared_ptr<RRSIGRecordContent>>(), vector<std::shared_ptr<DNSRecord>>(), true, boost::none, validationState);
       }
       
       nsset.push_back(nsrr);
@@ -86,32 +79,33 @@ void primeHints(void)
       if(rr.qtype.getCode()==QType::A) {
         vector<DNSRecord> aset;
         aset.push_back(DNSRecord(rr));
-        t_RC->replace(time(0), rr.qname, QType(QType::A), aset, vector<std::shared_ptr<RRSIGRecordContent>>(), true); // auth, etc see above
+        t_RC->replace(time(0), rr.qname, QType(QType::A), aset, vector<std::shared_ptr<RRSIGRecordContent>>(), vector<std::shared_ptr<DNSRecord>>(), true, boost::none, validationState); // auth, etc see above
       } else if(rr.qtype.getCode()==QType::AAAA) {
         vector<DNSRecord> aaaaset;
         aaaaset.push_back(DNSRecord(rr));
-        t_RC->replace(time(0), rr.qname, QType(QType::AAAA), aaaaset, vector<std::shared_ptr<RRSIGRecordContent>>(), true);
+        t_RC->replace(time(0), rr.qname, QType(QType::AAAA), aaaaset, vector<std::shared_ptr<RRSIGRecordContent>>(), vector<std::shared_ptr<DNSRecord>>(), true, boost::none, validationState);
       } else if(rr.qtype.getCode()==QType::NS) {
         rr.content=toLower(rr.content);
         nsset.push_back(DNSRecord(rr));
       }
     }
   }
-  t_RC->replace(time(0), DNSName(), QType(QType::NS), nsset, vector<std::shared_ptr<RRSIGRecordContent>>(), true); // and stuff in the cache (auth)
+  t_RC->doWipeCache(g_rootdnsname, false, QType::NS);
+  t_RC->replace(time(0), g_rootdnsname, QType(QType::NS), nsset, vector<std::shared_ptr<RRSIGRecordContent>>(), vector<std::shared_ptr<DNSRecord>>(), false, boost::none, validationState); // and stuff in the cache
 }
 
-static void makeNameToIPZone(SyncRes::domainmap_t* newMap, const DNSName& hostname, const string& ip)
+static void makeNameToIPZone(std::shared_ptr<SyncRes::domainmap_t> newMap, const DNSName& hostname, const string& ip)
 {
   SyncRes::AuthDomain ad;
   ad.d_rdForward=false;
 
   DNSRecord dr;
   dr.d_name=hostname;
-  dr.d_place=DNSRecord::Answer;
+  dr.d_place=DNSResourceRecord::ANSWER;
   dr.d_ttl=86400;
   dr.d_type=QType::SOA;
   dr.d_class = 1;
-  dr.d_content = std::shared_ptr<DNSRecordContent>(DNSRecordContent::mastermake(QType::SOA, 1, "localhost. root 1 604800 86400 2419200 604800"));
+  dr.d_content = DNSRecordContent::mastermake(QType::SOA, 1, "localhost. root 1 604800 86400 2419200 604800");
   
   ad.d_records.insert(dr);
 
@@ -121,20 +115,21 @@ static void makeNameToIPZone(SyncRes::domainmap_t* newMap, const DNSName& hostna
   ad.d_records.insert(dr);
   
   dr.d_type=QType::A;
-  dr.d_content= std::shared_ptr<DNSRecordContent>(DNSRecordContent::mastermake(QType::A, 1, ip));
+  dr.d_content = DNSRecordContent::mastermake(QType::A, 1, ip);
   ad.d_records.insert(dr);
   
   if(newMap->count(dr.d_name)) {  
-    L<<Logger::Warning<<"Hosts file will not overwrite zone '"<<dr.d_name<<"' already loaded"<<endl;
+    g_log<<Logger::Warning<<"Hosts file will not overwrite zone '"<<dr.d_name<<"' already loaded"<<endl;
   }
   else {
-    L<<Logger::Warning<<"Inserting forward zone '"<<dr.d_name<<"' based on hosts file"<<endl;
-    (*newMap)[dr.d_name]=ad;
+    g_log<<Logger::Warning<<"Inserting forward zone '"<<dr.d_name<<"' based on hosts file"<<endl;
+    ad.d_name=dr.d_name;
+    (*newMap)[ad.d_name]=ad;
   }
 }
 
 //! parts[0] must be an IP address, the rest must be host names
-static void makeIPToNamesZone(SyncRes::domainmap_t* newMap, const vector<string>& parts) 
+static void makeIPToNamesZone(std::shared_ptr<SyncRes::domainmap_t> newMap, const vector<string>& parts)
 {
   string address=parts[0];
   vector<string> ipparts;
@@ -150,10 +145,10 @@ static void makeIPToNamesZone(SyncRes::domainmap_t* newMap, const vector<string>
   dr.d_name.appendRawLabel("in-addr");
   dr.d_name.appendRawLabel("arpa");
   dr.d_class = 1;
-  dr.d_place=DNSRecord::Answer;
+  dr.d_place=DNSResourceRecord::ANSWER;
   dr.d_ttl=86400;
   dr.d_type=QType::SOA;
-  dr.d_content=std::shared_ptr<DNSRecordContent>(DNSRecordContent::mastermake(QType::SOA, 1, "localhost. root 1 604800 86400 2419200 604800"));
+  dr.d_content=DNSRecordContent::mastermake(QType::SOA, 1, "localhost. root 1 604800 86400 2419200 604800");
   
   ad.d_records.insert(dr);
 
@@ -165,17 +160,18 @@ static void makeIPToNamesZone(SyncRes::domainmap_t* newMap, const vector<string>
 
   if(ipparts.size()==4)  // otherwise this is a partial zone
     for(unsigned int n=1; n < parts.size(); ++n) {
-      dr.d_content=std::shared_ptr<DNSRecordContent>(DNSRecordContent::mastermake(QType::PTR, 1, DNSName(parts[n]).toString())); // XXX FIXME DNSNAME PAIN CAN THIS BE RIGHT?
+      dr.d_content=DNSRecordContent::mastermake(QType::PTR, 1, DNSName(parts[n]).toString()); // XXX FIXME DNSNAME PAIN CAN THIS BE RIGHT?
       ad.d_records.insert(dr);
     }
 
   if(newMap->count(dr.d_name)) {  
-    L<<Logger::Warning<<"Will not overwrite zone '"<<dr.d_name<<"' already loaded"<<endl;
+    g_log<<Logger::Warning<<"Will not overwrite zone '"<<dr.d_name<<"' already loaded"<<endl;
   }
   else {
     if(ipparts.size()==4)
-      L<<Logger::Warning<<"Inserting reverse zone '"<<dr.d_name<<"' based on hosts file"<<endl;
-    (*newMap)[dr.d_name]=ad;
+      g_log<<Logger::Warning<<"Inserting reverse zone '"<<dr.d_name<<"' based on hosts file"<<endl;
+    ad.d_name = dr.d_name;
+    (*newMap)[ad.d_name]=ad;
   }
 }
 
@@ -197,14 +193,14 @@ ComboAddress parseIPAndPort(const std::string& input, uint16_t port)
 
   try { // case 2
     both=splitField(input,':');
-    uint16_t newport=boost::lexical_cast<uint16_t>(both.second);
+    uint16_t newport=static_cast<uint16_t>(pdns_stou(both.second));
     return ComboAddress(both.first, newport);
   } 
   catch(...){}
 
   if(input[0]=='[') { // case 4
     both=splitField(input.substr(1),']');
-    return ComboAddress(both.first, both.second.empty() ? port : boost::lexical_cast<uint16_t>(both.second.substr(1)));
+    return ComboAddress(both.first, both.second.empty() ? port : static_cast<uint16_t>(pdns_stou(both.second.substr(1))));
   }
 
   return ComboAddress(input, port); // case 3
@@ -219,46 +215,44 @@ void convertServersForAD(const std::string& input, SyncRes::AuthDomain& ad, cons
 
   for(vector<string>::const_iterator iter = servers.begin(); iter != servers.end(); ++iter) {
     if(verbose && iter != servers.begin()) 
-      L<<", ";
+      g_log<<", ";
 
     ComboAddress addr=parseIPAndPort(*iter, 53);
     if(verbose)
-      L<<addr.toStringWithPort();
+      g_log<<addr.toStringWithPort();
     ad.d_servers.push_back(addr);
   }
   if(verbose)
-    L<<endl;
+    g_log<<endl;
 }
 
 void* pleaseWipeNegCache()
 {
-  t_sstorage->negcache.clear();   
+  SyncRes::clearNegCache();
   return 0;
 }
 
-void* pleaseUseNewSDomainsMap(SyncRes::domainmap_t* newmap)
+void* pleaseUseNewSDomainsMap(std::shared_ptr<SyncRes::domainmap_t> newmap)
 {
-  t_sstorage->domainmap = newmap;
+  SyncRes::setDomainMap(newmap);
   return 0;
 }
 
 string reloadAuthAndForwards()
 {
-  SyncRes::domainmap_t* original=t_sstorage->domainmap;  
+  std::shared_ptr<SyncRes::domainmap_t> original=SyncRes::getDomainMap();
   
   try {
-    L<<Logger::Warning<<"Reloading zones, purging data from cache"<<endl;
-  
-    for(SyncRes::domainmap_t::const_iterator i = t_sstorage->domainmap->begin(); i != t_sstorage->domainmap->end(); ++i) {
-      for(SyncRes::AuthDomain::records_t::const_iterator j = i->second.d_records.begin(); j != i->second.d_records.end(); ++j) 
-        broadcastAccFunction<uint64_t>(boost::bind(pleaseWipeCache, j->d_name));
-    }
+    g_log<<Logger::Warning<<"Reloading zones, purging data from cache"<<endl;
 
     string configname=::arg()["config-dir"]+"/recursor.conf";
+    if(::arg()["config-name"]!="") {
+      configname=::arg()["config-dir"]+"/recursor-"+::arg()["config-name"]+".conf";
+    }
     cleanSlashes(configname);
     
-    if(!::arg().preParseFile(configname.c_str(), "forward-zones")) 
-      L<<Logger::Warning<<"Unable to re-parse configuration file '"<<configname<<"'"<<endl;
+    if(!::arg().preParseFile(configname.c_str(), "forward-zones"))
+      throw runtime_error("Unable to re-parse configuration file '"+configname+"'");
     ::arg().preParseFile(configname.c_str(), "forward-zones-file");
     ::arg().preParseFile(configname.c_str(), "forward-zones-recurse");
     ::arg().preParseFile(configname.c_str(), "auth-zones");
@@ -271,8 +265,9 @@ string reloadAuthAndForwards()
     std::vector<std::string> extraConfigs;
     ::arg().gatherIncludes(extraConfigs);
 
-    BOOST_FOREACH(const std::string& fn, extraConfigs) {
-      ::arg().preParseFile(fn.c_str(), "forward-zones", ::arg()["forward-zones"]);
+    for(const std::string& fn :  extraConfigs) {
+      if(!::arg().preParseFile(fn.c_str(), "forward-zones", ::arg()["forward-zones"]))
+        throw runtime_error("Unable to re-parse configuration file include '"+fn+"'");
       ::arg().preParseFile(fn.c_str(), "forward-zones-file", ::arg()["forward-zones-file"]);
       ::arg().preParseFile(fn.c_str(), "forward-zones-recurse", ::arg()["forward-zones-recurse"]);
       ::arg().preParseFile(fn.c_str(), "auth-zones",::arg()["auth-zones"]);
@@ -287,100 +282,109 @@ string reloadAuthAndForwards()
     ::arg().preParse(g_argc, g_argv, "export-etc-hosts");
     ::arg().preParse(g_argc, g_argv, "serve-rfc1918");
 
-    SyncRes::domainmap_t* newDomainMap = parseAuthAndForwards();
-    
-    // purge again - new zones need to blank out the cache
-    for(SyncRes::domainmap_t::const_iterator i = newDomainMap->begin(); i != newDomainMap->end(); ++i) {
-      for(SyncRes::AuthDomain::records_t::const_iterator j = i->second.d_records.begin(); j != i->second.d_records.end(); ++j) 
-        broadcastAccFunction<uint64_t>(boost::bind(pleaseWipeCache, j->d_name));
+    std::shared_ptr<SyncRes::domainmap_t> newDomainMap = parseAuthAndForwards();
+
+    // purge both original and new names
+    std::set<DNSName> oldAndNewDomains;
+    for(const auto& i : *newDomainMap) {
+      oldAndNewDomains.insert(i.first);
     }
 
-    // this is pretty blunt
-    broadcastFunction(pleaseWipeNegCache);
-    broadcastFunction(boost::bind(pleaseUseNewSDomainsMap, newDomainMap)); 
-    delete original;
+    if(original) {
+      for(const auto& i : *original) {
+        oldAndNewDomains.insert(i.first);
+      }
+    }
+
+    for(const auto i : oldAndNewDomains) {
+        broadcastAccFunction<uint64_t>(boost::bind(pleaseWipeCache, i, true));
+        broadcastAccFunction<uint64_t>(boost::bind(pleaseWipePacketCache, i, true));
+        broadcastAccFunction<uint64_t>(boost::bind(pleaseWipeAndCountNegCache, i, true));
+    }
+
+    broadcastFunction(boost::bind(pleaseUseNewSDomainsMap, newDomainMap));
     return "ok\n";
   }
   catch(std::exception& e) {
-    L<<Logger::Error<<"Encountered error reloading zones, keeping original data: "<<e.what()<<endl;
+    g_log<<Logger::Error<<"Encountered error reloading zones, keeping original data: "<<e.what()<<endl;
   }
   catch(PDNSException& ae) {
-    L<<Logger::Error<<"Encountered error reloading zones, keeping original data: "<<ae.reason<<endl;
+    g_log<<Logger::Error<<"Encountered error reloading zones, keeping original data: "<<ae.reason<<endl;
   }
   catch(...) {
-    L<<Logger::Error<<"Encountered unknown error reloading zones, keeping original data"<<endl;
+    g_log<<Logger::Error<<"Encountered unknown error reloading zones, keeping original data"<<endl;
   }
   return "reloading failed, see log\n";
 }
 
-SyncRes::domainmap_t* parseAuthAndForwards()
+std::shared_ptr<SyncRes::domainmap_t> parseAuthAndForwards()
 {
   TXTRecordContent::report();
   OPTRecordContent::report();
 
-  SyncRes::domainmap_t* newMap = new SyncRes::domainmap_t();
+  auto newMap = std::make_shared<SyncRes::domainmap_t>();
 
   typedef vector<string> parts_t;
   parts_t parts;  
   const char *option_names[3]={"auth-zones", "forward-zones", "forward-zones-recurse"};
   for(int n=0; n < 3 ; ++n ) {
     parts.clear();
-    stringtok(parts, ::arg()[option_names[n]], ",\t\n\r");
+    stringtok(parts, ::arg()[option_names[n]], " ,\t\n\r");
     for(parts_t::const_iterator iter = parts.begin(); iter != parts.end(); ++iter) {
       SyncRes::AuthDomain ad;
+      if ((*iter).find('=') == string::npos)
+        throw PDNSException("Error parsing '" + *iter + "', missing =");
       pair<string,string> headers=splitField(*iter, '=');
       trim(headers.first);
       trim(headers.second);
       // headers.first=toCanonic("", headers.first);
       if(n==0) {
         ad.d_rdForward = false;
-        L<<Logger::Error<<"Parsing authoritative data for zone '"<<headers.first<<"' from file '"<<headers.second<<"'"<<endl;
+        g_log<<Logger::Error<<"Parsing authoritative data for zone '"<<headers.first<<"' from file '"<<headers.second<<"'"<<endl;
         ZoneParserTNG zpt(headers.second, DNSName(headers.first));
         DNSResourceRecord rr;
 	DNSRecord dr;
         while(zpt.get(rr)) {
           try {
 	    dr=DNSRecord(rr);
-	    dr.d_place=DNSRecord::Answer;
+	    dr.d_place=DNSResourceRecord::ANSWER;
           }
           catch(std::exception &e) {
-            delete newMap;
-            throw PDNSException("Error parsing record '"+rr.qname.toString()+"' of type "+rr.qtype.getName()+" in zone '"+headers.first+"' from file '"+headers.second+"': "+e.what());
+            throw PDNSException("Error parsing record '"+rr.qname.toLogString()+"' of type "+rr.qtype.getName()+" in zone '"+headers.first+"' from file '"+headers.second+"': "+e.what());
           }
           catch(...) {
-            delete newMap;
-            throw PDNSException("Error parsing record '"+rr.qname.toString()+"' of type "+rr.qtype.getName()+" in zone '"+headers.first+"' from file '"+headers.second+"'");
+            throw PDNSException("Error parsing record '"+rr.qname.toLogString()+"' of type "+rr.qtype.getName()+" in zone '"+headers.first+"' from file '"+headers.second+"'");
           }
 
           ad.d_records.insert(dr);
         }
       }
       else {
-        L<<Logger::Error<<"Redirecting queries for zone '"<<headers.first<<"' ";
+        g_log<<Logger::Error<<"Redirecting queries for zone '"<<headers.first<<"' ";
         if(n == 2) {
-          L<<"with recursion ";
+          g_log<<"with recursion ";
           ad.d_rdForward = true;
         }
         else ad.d_rdForward = false;
-        L<<"to: ";
+        g_log<<"to: ";
         
         convertServersForAD(headers.second, ad, ";");
         if(n == 2) {
           ad.d_rdForward = true;
         }
       }
-      
-      (*newMap)[DNSName(headers.first)]=ad; 
+
+      ad.d_name = DNSName(headers.first);
+      (*newMap)[ad.d_name]=ad;
     }
   }
   
   if(!::arg()["forward-zones-file"].empty()) {
-    L<<Logger::Warning<<"Reading zone forwarding information from '"<<::arg()["forward-zones-file"]<<"'"<<endl;
+    g_log<<Logger::Warning<<"Reading zone forwarding information from '"<<::arg()["forward-zones-file"]<<"'"<<endl;
     SyncRes::AuthDomain ad;
     FILE *rfp=fopen(::arg()["forward-zones-file"].c_str(), "r");
 
     if(!rfp) {
-      delete newMap;
       throw PDNSException("Error opening forward-zones-file '"+::arg()["forward-zones-file"]+"': "+stringerror());
     }
 
@@ -390,8 +394,12 @@ SyncRes::domainmap_t* parseAuthAndForwards()
     int linenum=0;
     uint64_t before = newMap->size();
     while(linenum++, stringfgets(fp.get(), line)) {
+      trim(line);
+      if (line[0] == '#') // Comment line, skip to the next line
+        continue;
       string domain, instructions;
       tie(domain, instructions)=splitField(line, '=');
+      instructions = splitField(instructions, '#').first; // Remove EOL comments
       trim(domain);
       trim(instructions);
       if(domain.empty() && instructions.empty()) { // empty line
@@ -404,21 +412,20 @@ SyncRes::domainmap_t* parseAuthAndForwards()
       else
         ad.d_rdForward = false;
       if(domain.empty()) {
-        delete newMap;
-        throw PDNSException("Error parsing line "+lexical_cast<string>(linenum)+" of " +::arg()["forward-zones-file"]);
+        throw PDNSException("Error parsing line "+std::to_string(linenum)+" of " +::arg()["forward-zones-file"]);
       }
 
       try {
         convertServersForAD(instructions, ad, ",; ", false);
       }
       catch(...) {
-        delete newMap;
-        throw PDNSException("Conversion error parsing line "+lexical_cast<string>(linenum)+" of " +::arg()["forward-zones-file"]);
+        throw PDNSException("Conversion error parsing line "+std::to_string(linenum)+" of " +::arg()["forward-zones-file"]);
       }
 
-      (*newMap)[DNSName(domain)]=ad;
+      ad.d_name = DNSName(domain);
+      (*newMap)[ad.d_name]=ad;
     }
-    L<<Logger::Warning<<"Done parsing " << newMap->size() - before<<" forwarding instructions from file '"<<::arg()["forward-zones-file"]<<"'"<<endl;
+    g_log<<Logger::Warning<<"Done parsing " << newMap->size() - before<<" forwarding instructions from file '"<<::arg()["forward-zones-file"]<<"'"<<endl;
   }
 
   if(::arg().mustDo("export-etc-hosts")) {
@@ -427,7 +434,7 @@ SyncRes::domainmap_t* parseAuthAndForwards()
     
     ifstream ifs(fname.c_str());
     if(!ifs) {
-      L<<Logger::Warning<<"Could not open /etc/hosts for reading"<<endl;
+      g_log<<Logger::Warning<<"Could not open "<<fname<<" for reading"<<endl;
     }
     else {
       string searchSuffix = ::arg()["export-etc-hosts-search-suffix"];
@@ -459,7 +466,7 @@ SyncRes::domainmap_t* parseAuthAndForwards()
     }
   }
   if(::arg().mustDo("serve-rfc1918")) {
-    L<<Logger::Warning<<"Inserting rfc 1918 private space zones"<<endl;
+    g_log<<Logger::Warning<<"Inserting rfc 1918 private space zones"<<endl;
     parts.clear();
     parts.push_back("127");
     makeIPToNamesZone(newMap, parts);
@@ -469,7 +476,7 @@ SyncRes::domainmap_t* parseAuthAndForwards()
     parts[0]="192.168";
     makeIPToNamesZone(newMap, parts);
     for(int n=16; n < 32; n++) {
-      parts[0]="172."+lexical_cast<string>(n);
+      parts[0]="172."+std::to_string(n);
       makeIPToNamesZone(newMap,parts);
     }
   }

@@ -10,6 +10,7 @@
 #include "misc.hh"
 #include "pdnsexception.hh"
 #include "namespaces.hh"
+#include "iputils.hh"
 #define YYDEBUG 1
 extern int yydebug;
 #include "bindparserclasses.hh"
@@ -89,6 +90,8 @@ void BindParser::setVerbose(bool verbose)
 
 void BindParser::commit(BindDomainInfo DI)
 {
+  DI.hadFileDirective = (DI.filename != "");
+
   if(DI.filename[0]!='/')
     DI.filename=d_dir+"/"+DI.filename;
 
@@ -125,7 +128,7 @@ command:
 global_zone_command:
 	ZONETOK quotedname zone_block
 	{
-		s_di.name=DNSName(stripDot($2));
+		s_di.name=DNSName($2);
 		free($2);
 		parent->commit(s_di);
 		s_di.clear();
@@ -133,7 +136,7 @@ global_zone_command:
 	|	
 	ZONETOK quotedname AWORD zone_block
 	{
-	        s_di.name=DNSName(stripDot($2));
+	        s_di.name=DNSName($2);
 		free($2);
 		parent->commit(s_di);
 		s_di.clear();
@@ -251,7 +254,7 @@ masters: /* empty */
 
 master: AWORD
 	{
-		s_di.masters.push_back($1);
+		s_di.masters.push_back(ComboAddress($1, 53));
 		free($1);
 	}
 	;

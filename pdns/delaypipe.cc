@@ -1,6 +1,29 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #include "delaypipe.hh"
 #include "misc.hh"
+#include "gettime.hh"
 #include <thread>
+#include "threadname.hh"
 
 template<class T>
 ObjectPipe<T>::ObjectPipe()
@@ -30,8 +53,10 @@ template<class T>
 void ObjectPipe<T>::write(T& t)
 {
   auto ptr = new T(t);
-  if(::write(d_fds[1], &ptr, sizeof(ptr)) != sizeof(ptr))
+  if(::write(d_fds[1], &ptr, sizeof(ptr)) != sizeof(ptr)) {
+    delete ptr;
     unixDie("write");
+  }
 }
 
 template<class T>
@@ -44,6 +69,8 @@ bool ObjectPipe<T>::read(T* t)
     unixDie("read");
   if(ret==0)
     return false;
+  if(ret != sizeof(ptr))
+    throw std::runtime_error("Partial read, should not happen");    
   *t=*ptr;
   delete ptr;
   return true;
@@ -66,6 +93,8 @@ int ObjectPipe<T>::readTimeout(T* t, double msec)
     unixDie("read");
   if(ret==0)
     return false;
+  if(ret != sizeof(ptr))
+    throw std::runtime_error("Partial read, should not happen 2");    
   *t=*ptr;
   delete ptr;
   return 1;
@@ -80,14 +109,7 @@ DelayPipe<T>::DelayPipe() : d_thread(&DelayPipe<T>::worker, this)
 template<class T>
 void DelayPipe<T>::gettime(struct timespec* ts)
 {
-#ifdef __MACH__  // this is a 'limp home' solution since it doesn't do monotonic time. see http://stackoverflow.com/questions/5167269/clock-gettime-alternative-in-mac-os-x
-  struct timeval tv;
-  gettimeofday(&tv, 0);
-  ts->tv_sec = tv.tv_sec;
-  ts->tv_nsec = tv.tv_usec * 1000;
-#else
-  clock_gettime(CLOCK_MONOTONIC, ts);
-#endif
+  ::gettime(ts);
 }
 
 
@@ -117,6 +139,7 @@ DelayPipe<T>::~DelayPipe()
 template<class T>
 void DelayPipe<T>::worker()
 {
+  setThreadName("dnsdist/delayPi");
   Combo c;
   for(;;) {
     /* this code is slightly too subtle, but I don't see how it could be any simpler.

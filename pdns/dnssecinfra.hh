@@ -1,3 +1,24 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifndef PDNS_DNSSECINFRA_HH
 #define PDNS_DNSSECINFRA_HH
 
@@ -7,7 +28,8 @@
 #include <vector>
 #include <map>
 #include "misc.hh"
-#include "ueberbackend.hh"
+
+class UeberBackend;
 
 // rules of the road: Algorithm must be set in 'make' for each KeyEngine, and will NEVER change!
 
@@ -24,12 +46,20 @@ class DNSCryptoKeyEngine
     virtual storvector_t convertToISCVector() const =0;
     std::string convertToISC() const ;
     virtual std::string sign(const std::string& msg) const =0;
-    virtual std::string hash(const std::string& msg) const =0;
+    virtual std::string hash(const std::string& msg) const
+    {
+       throw std::runtime_error("hash() function not implemented");
+       return msg;
+    }
     virtual bool verify(const std::string& msg, const std::string& signature) const =0;
     
     virtual std::string getPubKeyHash()const =0;
     virtual std::string getPublicKeyString()const =0;
     virtual int getBits() const =0;
+    virtual unsigned int getAlgorithm() const
+    {
+      return d_algorithm;
+    }
  
     virtual void fromISCMap(DNSKEYRecordContent& drc, stormap_t& stormap)=0;
     virtual void fromPEMString(DNSKEYRecordContent& drc, const std::string& raw)
@@ -37,17 +67,23 @@ class DNSCryptoKeyEngine
       throw std::runtime_error("Can't import from PEM string");
     }
     virtual void fromPublicKeyString(const std::string& content) = 0;
+    virtual bool checkKey(vector<string> *errorMessages = nullptr) const
+    {
+      return true;
+    }
+    static shared_ptr<DNSCryptoKeyEngine> makeFromISCFile(DNSKEYRecordContent& drc, const char* fname);
+    static shared_ptr<DNSCryptoKeyEngine> makeFromISCString(DNSKEYRecordContent& drc, const std::string& content);
+    static shared_ptr<DNSCryptoKeyEngine> makeFromPEMString(DNSKEYRecordContent& drc, const std::string& raw);
+    static shared_ptr<DNSCryptoKeyEngine> makeFromPublicKeyString(unsigned int algorithm, const std::string& raw);
+    static shared_ptr<DNSCryptoKeyEngine> make(unsigned int algorithm);
+    static bool isAlgorithmSupported(unsigned int algo);
+    static bool isDigestSupported(uint8_t digest);
     
-    static DNSCryptoKeyEngine* makeFromISCFile(DNSKEYRecordContent& drc, const char* fname);
-    static DNSCryptoKeyEngine* makeFromISCString(DNSKEYRecordContent& drc, const std::string& content);
-    static DNSCryptoKeyEngine* makeFromPEMString(DNSKEYRecordContent& drc, const std::string& raw);
-    static DNSCryptoKeyEngine* makeFromPublicKeyString(unsigned int algorithm, const std::string& raw);
-    static DNSCryptoKeyEngine* make(unsigned int algorithm);
-    
-    typedef DNSCryptoKeyEngine* maker_t(unsigned int algorithm);
+    typedef shared_ptr<DNSCryptoKeyEngine> maker_t(unsigned int algorithm);
     
     static void report(unsigned int algorithm, maker_t* maker, bool fallback=false);
     static std::pair<unsigned int, unsigned int> testMakers(unsigned int algorithm, maker_t* creator, maker_t* signer, maker_t* verifier);
+    static vector<pair<uint8_t, string>> listAllAlgosWithBackend();
     static bool testAll();
     static bool testOne(int algo);
   private:
@@ -70,16 +106,20 @@ class DNSCryptoKeyEngine
 
 struct DNSSECPrivateKey
 {
-  uint16_t getTag();
-  
-  const DNSCryptoKeyEngine* getKey() const
+  uint16_t getTag() const
   {
-    return d_key.get();
+    return getDNSKEY().getTag();
+  }
+  
+  const shared_ptr<DNSCryptoKeyEngine> getKey() const
+  {
+    return d_key;
   }
   
   void setKey(const shared_ptr<DNSCryptoKeyEngine> key)
   {
     d_key = key;
+    d_algorithm = key->getAlgorithm();
   }
   DNSKEYRecordContent getDNSKEY() const;
 
@@ -107,31 +147,24 @@ struct CanonicalCompare: public std::binary_function<string, string, bool>
   }
 };
 
-bool sharedDNSSECCompare(const std::shared_ptr<DNSRecordContent>& a, const shared_ptr<DNSRecordContent>& b);
-string getMessageForRRSET(const DNSName& qname, const RRSIGRecordContent& rrc, std::vector<std::shared_ptr<DNSRecordContent> >& signRecords);
+string getMessageForRRSET(const DNSName& qname, const RRSIGRecordContent& rrc, std::vector<std::shared_ptr<DNSRecordContent> >& signRecords, bool processRRSIGLabels = false);
 
-DSRecordContent makeDSFromDNSKey(const DNSName& qname, const DNSKEYRecordContent& drc, int digest=1);
+DSRecordContent makeDSFromDNSKey(const DNSName& qname, const DNSKEYRecordContent& drc, uint8_t digest);
 
-
-class RSAContext;
 class DNSSECKeeper; 
-struct DNSSECPrivateKey;
 
-void fillOutRRSIG(DNSSECPrivateKey& dpk, const DNSName& signQName, RRSIGRecordContent& rrc, vector<shared_ptr<DNSRecordContent> >& toSign);
 uint32_t getStartOfWeek();
-void addSignature(DNSSECKeeper& dk, UeberBackend& db, const DNSName& signer, const DNSName signQName, const DNSName& wildcardname, uint16_t signQType, uint32_t signTTL, DNSPacketWriter::Place signPlace,
-  vector<shared_ptr<DNSRecordContent> >& toSign, vector<DNSResourceRecord>& outsigned, uint32_t origTTL);
-int getRRSIGsForRRSET(DNSSECKeeper& dk, const DNSName& signer, const DNSName signQName, uint16_t signQType, uint32_t signTTL,
-  vector<shared_ptr<DNSRecordContent> >& toSign, vector<RRSIGRecordContent> &rrc);
 
 string hashQNameWithSalt(const NSEC3PARAMRecordContent& ns3prc, const DNSName& qname);
-void decodeDERIntegerSequence(const std::string& input, vector<string>& output);
-class DNSPacket;
-void addRRSigs(DNSSECKeeper& dk, UeberBackend& db, const std::set<DNSName>& authMap, vector<DNSResourceRecord>& rrs);
+string hashQNameWithSalt(const std::string& salt, unsigned int iterations, const DNSName& qname);
 
-string calculateHMAC(const std::string& key, const std::string& text, TSIGHashEnum hash);
+void incrementHash(std::string& raw);
+void decrementHash(std::string& raw);
 
-string makeTSIGMessageFromTSIGPacket(const string& opacket, unsigned int tsigoffset, const DNSName& keyname, const TSIGRecordContent& trc, const string& previous, bool timersonly, unsigned int dnsHeaderOffset=0);
-void addTSIG(DNSPacketWriter& pw, TSIGRecordContent* trc, const DNSName& tsigkeyname, const string& tsigsecret, const string& tsigprevious, bool timersonly);
+void addRRSigs(DNSSECKeeper& dk, UeberBackend& db, const std::set<DNSName>& authMap, vector<DNSZoneRecord>& rrs);
+
+void addTSIG(DNSPacketWriter& pw, TSIGRecordContent& trc, const DNSName& tsigkeyname, const string& tsigsecret, const string& tsigprevious, bool timersonly);
+bool validateTSIG(const std::string& packet, size_t sigPos, const TSIGTriplet& tt, const TSIGRecordContent& trc, const std::string& previousMAC, const std::string& theirMAC, bool timersOnly, unsigned int dnsHeaderOffset=0);
+
 uint64_t signatureCacheSize(const std::string& str);
 #endif

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -e
-set -x
+if [ "${PDNS_DEBUG}" = "YES" ]; then
+  set -x
+fi
 
 bindwait ()
 {
@@ -26,7 +28,7 @@ rm -f pdns*.pid
 
 $PDNS --daemon=no --local-port=$port --socket-dir=./          \
 	--no-shuffle --launch=bind --bind-config=edns-packet-cache/named.conf   \
-	--send-root-referral --cache-ttl=60 --no-config --module-dir=../regression-tests/modules &
+	--cache-ttl=60 --no-config --module-dir=../regression-tests/modules &
 bindwait
 	
 # prime cache without EDNS

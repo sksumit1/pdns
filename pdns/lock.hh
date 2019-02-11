@@ -1,24 +1,24 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2002  PowerDNS.COM BV
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2
-    as published by the Free Software Foundation
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifndef LOCK_HH
 #define LOCK_HH
 
@@ -33,13 +33,19 @@ class Lock
 {
   pthread_mutex_t *d_lock;
 public:
+  Lock(const Lock& rhs) = delete;
+  Lock& operator=(const Lock& rhs) = delete;
 
   Lock(pthread_mutex_t *lock) : d_lock(lock)
   {
     if(g_singleThreaded)
       return;
-    if((errno=pthread_mutex_lock(d_lock)))
+
+    int err;
+    if((err = pthread_mutex_lock(d_lock))) {
+      errno = err;
       throw PDNSException("error acquiring lock: "+stringerror());
+    }
   }
   ~Lock()
   {
@@ -60,7 +66,9 @@ public:
     if(g_singleThreaded)
       return;
 
-    if((errno=pthread_rwlock_wrlock(d_lock))) {
+    int err;
+    if((err = pthread_rwlock_wrlock(d_lock))) {
+      errno = err;
       throw PDNSException("error acquiring rwlock wrlock: "+stringerror());
     }
   }
@@ -68,9 +76,19 @@ public:
   {
     if(g_singleThreaded)
       return;
-
-    pthread_rwlock_unlock(d_lock);
+    if(d_lock) // might have been moved
+      pthread_rwlock_unlock(d_lock);
   }
+
+  WriteLock(WriteLock&& rhs)
+  {
+    d_lock = rhs.d_lock;
+    rhs.d_lock=0;
+  }
+  WriteLock(const WriteLock& rhs) = delete;
+  WriteLock& operator=(const WriteLock& rhs) = delete;
+
+
 };
 
 class TryWriteLock
@@ -78,6 +96,8 @@ class TryWriteLock
   pthread_rwlock_t *d_lock;
   bool d_havelock;
 public:
+  TryWriteLock(const TryWriteLock& rhs) = delete;
+  TryWriteLock& operator=(const TryWriteLock& rhs) = delete;
 
   TryWriteLock(pthread_rwlock_t *lock) : d_lock(lock)
   {
@@ -87,16 +107,29 @@ public:
     }
 
     d_havelock=false;
-    if((errno=pthread_rwlock_trywrlock(d_lock)) && errno!=EBUSY)
+    int err;
+    if((err = pthread_rwlock_trywrlock(d_lock)) && err!=EBUSY) {
+      errno = err;
       throw PDNSException("error acquiring rwlock tryrwlock: "+stringerror());
-    d_havelock=(errno==0);
+    }
+    d_havelock=(err==0);
   }
+
+  TryWriteLock(TryWriteLock&& rhs)
+  {
+    d_lock = rhs.d_lock;
+    rhs.d_lock = nullptr;
+    d_havelock = rhs.d_havelock;
+    rhs.d_havelock = false;
+  }
+
+  
   ~TryWriteLock()
   {
     if(g_singleThreaded)
       return;
 
-    if(d_havelock)
+    if(d_havelock && d_lock) // we might be moved
       pthread_rwlock_unlock(d_lock);
   }
   bool gotIt()
@@ -113,6 +146,8 @@ class TryReadLock
   pthread_rwlock_t *d_lock;
   bool d_havelock;
 public:
+  TryReadLock(const TryReadLock& rhs) = delete;
+  TryReadLock& operator=(const TryReadLock& rhs) = delete;
 
   TryReadLock(pthread_rwlock_t *lock) : d_lock(lock)
   {
@@ -121,16 +156,27 @@ public:
       return;
     }
 
-    if((errno=pthread_rwlock_tryrdlock(d_lock)) && errno!=EBUSY)
+    int err;
+    if((err = pthread_rwlock_tryrdlock(d_lock)) && err!=EBUSY) {
+      errno = err;
       throw PDNSException("error acquiring rwlock tryrdlock: "+stringerror());
-    d_havelock=(errno==0);
+    }
+    d_havelock=(err==0);
   }
+  TryReadLock(TryReadLock&& rhs)
+  {
+    d_lock = rhs.d_lock;
+    rhs.d_lock = nullptr;
+    d_havelock = rhs.d_havelock;
+    rhs.d_havelock = false;
+  }
+
   ~TryReadLock()
   {
     if(g_singleThreaded)
       return;
 
-    if(d_havelock)
+    if(d_havelock && d_lock)
       pthread_rwlock_unlock(d_lock);
   }
   bool gotIt()
@@ -153,24 +199,26 @@ public:
     if(g_singleThreaded)
       return;
 
-    if((errno=pthread_rwlock_rdlock(d_lock)))
-      throw PDNSException("error acquiring rwlock tryrwlock: "+stringerror());
+    int err;
+    if((err = pthread_rwlock_rdlock(d_lock))) {
+      errno = err;
+      throw PDNSException("error acquiring rwlock readlock: "+stringerror());
+    }
   }
   ~ReadLock()
   {
     if(g_singleThreaded)
       return;
-
-    pthread_rwlock_unlock(d_lock);
+    if(d_lock) // may have been moved
+      pthread_rwlock_unlock(d_lock);
   }
-  
-  void upgrade()
+
+  ReadLock(ReadLock&& rhs)
   {
-    if(g_singleThreaded)
-      return;
-
-    pthread_rwlock_unlock(d_lock);
-    pthread_rwlock_wrlock(d_lock);
+    d_lock = rhs.d_lock;
+    rhs.d_lock=0;
   }
+  ReadLock(const ReadLock& rhs) = delete;
+  ReadLock& operator=(const ReadLock& rhs) = delete;
 };
 #endif

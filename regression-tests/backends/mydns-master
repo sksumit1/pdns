@@ -11,7 +11,7 @@ case $context in
 		mysql --user="$MYDNSUSER" --password="$MYDNSPASSWD" --host="$MYDNSHOST" \
 			"$MYDNSDB" < ../modules/mydnsbackend/schema.mydns.sql
 
-		tosql mydns | grep -v 'double\.example\.com' | mysql --user="$MYDNSUSER" --password="$MYDNSPASSWD" --host="$MYDNSHOST" \
+		tosql mydns | grep -v 'double\.example\.com' | grep -v 'very-long-txt\.test\.com' | mysql --user="$MYDNSUSER" --password="$MYDNSPASSWD" --host="$MYDNSHOST" \
 			"$MYDNSDB"
 
 		cat > pdns-mydns.conf << __EOF__
@@ -22,12 +22,12 @@ mydns-user=$MYDNSUSER
 mydns-host=$MYDNSHOST
 mydns-password=$MYDNSPASSWD
 __EOF__
-		$RUNWRAPPER $PDNS --daemon=no --local-port=$port --socket-dir=./ \
+		$RUNWRAPPER $PDNS --daemon=no --local-address=$address --local-port=$port --socket-dir=./ \
 			--config-dir=. --config-name=mydns \
-			--no-shuffle --master --send-root-referral \
-			--cache-ttl=0 --experimental-dname-processing \
+			--no-shuffle --master \
+			--cache-ttl=0 --dname-processing \
 			--mydns-rr-active=no --mydns-soa-active=no --mydns-use-minimal-ttl=no &
-		skipreasons="nodnssec noent nodyndns nometa noaxfr"
+		skipreasons="nodnssec noent nodyndns nometa noaxfr noalias"
 		;;
 
 		*)

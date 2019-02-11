@@ -5,11 +5,9 @@
 #endif
 #include <boost/test/unit_test.hpp>
 #include <boost/assign/list_of.hpp>
-#include <boost/foreach.hpp>
+
 #include <boost/tuple/tuple.hpp>
-#include <boost/iostreams/stream.hpp>
 #include <boost/iostreams/device/file.hpp>
-#include <boost/lexical_cast.hpp>
 #include "dns.hh"
 #include "zoneparser-tng.hh"
 #include "dnsrecords.hh"
@@ -35,10 +33,10 @@ BOOST_AUTO_TEST_CASE(test_tng_record_types) {
   while(zp.get(rr)) {
     // make sure these concur.
     std::string host, type, data;
-    int ttl;
+    unsigned int ttl;
     std::getline(ifs, host, ' ');
     std::getline(ifs, type, ' ');
-    ttl = boost::lexical_cast<int>(type);
+    ttl = pdns_stou(type);
     std::getline(ifs, type, ' ');
     std::getline(ifs, type, ' ');
     std::getline(ifs, data, '\n');

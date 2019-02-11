@@ -1,3 +1,24 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -24,13 +45,13 @@ CoProcess::CoProcess(const string &command,int timeout, int infd, int outfd)
   vector <string> v;
   split(v, command, is_any_of(" "));
 
-  const char *argv[v.size()+1];
+  std::vector<const char *>argv(v.size()+1);
   argv[v.size()]=0;
 
   for (size_t n = 0; n < v.size(); n++)
     argv[n]=v[n].c_str();
   // we get away with not copying since nobody resizes v 
-  launch(argv, timeout, infd, outfd);
+  launch(argv.data(), timeout, infd, outfd);
 }
 
 void CoProcess::launch(const char **argv, int timeout, int infd, int outfd)
@@ -104,8 +125,8 @@ void CoProcess::checkStatus()
     throw PDNSException("Unable to ascertain status of coprocess "+itoa(d_pid)+" from "+itoa(getpid())+": "+string(strerror(errno)));
   else if(ret) {
     if(WIFEXITED(status)) {
-      int ret=WEXITSTATUS(status);
-      throw PDNSException("Coprocess exited with code "+itoa(ret));
+      int exitStatus=WEXITSTATUS(status);
+      throw PDNSException("Coprocess exited with code "+itoa(exitStatus));
     }
     if(WIFSIGNALED(status)) {
       int sig=WTERMSIG(status);

@@ -1,6 +1,25 @@
-/* Copyright 2001 Netherlabs BV, bert.hubert@netherlabs.nl. See LICENSE
-   for more information.
-   $Id$  */
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -13,47 +32,39 @@
 #include "pdns/namespaces.hh"
 #include "pdns/lock.hh"
 
+#if MYSQL_VERSION_ID >= 80000 && !defined(MARIADB_BASE_VERSION)
+// Need to keep this for compatibility with MySQL < 8.0.0, which used typedef char my_bool;
+// MariaDB up to 10.4 also always define it.
+typedef bool my_bool;
+#endif
+
 bool SMySQL::s_dolog;
 pthread_mutex_t SMySQL::s_myinitlock = PTHREAD_MUTEX_INITIALIZER;
 
 class SMySQLStatement: public SSqlStatement
 {
 public:
-  SMySQLStatement(const string& query, bool dolog, int nparams, MYSQL* db) 
+  SMySQLStatement(const string& query, bool dolog, int nparams, MYSQL* db) : d_prepared(false)
   {
-    int err;
     d_db = db;
     d_dolog = dolog;
     d_query = query;
-    d_parnum = d_paridx = d_fnum = d_resnum = d_residx = 0;
+    d_paridx = d_fnum = d_resnum = d_residx = 0;
+    d_parnum = nparams;
     d_req_bind = d_res_bind = NULL;
     d_stmt = NULL;
 
     if (query.empty()) {
       return;
     }
-
-    if ((d_stmt = mysql_stmt_init(d_db))==NULL) 
-      throw SSqlException("Could not initialize mysql statement, out of memory: " + d_query);
-    
-    if ((err = mysql_stmt_prepare(d_stmt, query.c_str(), query.size()))) {
-      string error(mysql_stmt_error(d_stmt));
-      throw SSqlException("Could not prepare statement: " + d_query + string(": ") + error);
-    }
-
-    if (static_cast<int>(mysql_stmt_param_count(d_stmt)) != nparams) 
-      throw SSqlException("Provided parameter count does not match statement: " + d_query);
-   
-    d_parnum = nparams;
-    if (d_parnum>0) {
-      d_req_bind = new MYSQL_BIND[d_parnum];
-      memset(d_req_bind, 0, sizeof(MYSQL_BIND)*d_parnum);
-    }
   }
 
   SSqlStatement* bind(const string& name, bool value) {
-    if (d_paridx >= d_parnum) 
+    prepareStatement();
+    if (d_paridx >= d_parnum) {
+      releaseStatement();
       throw SSqlException("Attempt to bind more parameters than query has: " + d_query);
+    }
     d_req_bind[d_paridx].buffer_type = MYSQL_TYPE_TINY;
     d_req_bind[d_paridx].buffer = new char[1];
     *((char*)d_req_bind[d_paridx].buffer) = (value?1:0);
@@ -67,8 +78,11 @@ public:
     return bind(name, (unsigned long)value);
   }
   SSqlStatement* bind(const string& name, long value) {
-    if (d_paridx >= d_parnum)
+    prepareStatement();
+    if (d_paridx >= d_parnum) {
+      releaseStatement();
       throw SSqlException("Attempt to bind more parameters than query has: " + d_query);
+    }
     d_req_bind[d_paridx].buffer_type = MYSQL_TYPE_LONG;
     d_req_bind[d_paridx].buffer = new long[1];
     *((long*)d_req_bind[d_paridx].buffer) = value;
@@ -76,8 +90,11 @@ public:
     return this;
   }
   SSqlStatement* bind(const string& name, unsigned long value) {
-    if (d_paridx >= d_parnum)
+    prepareStatement();
+    if (d_paridx >= d_parnum) {
+      releaseStatement();
       throw SSqlException("Attempt to bind more parameters than query has: " + d_query);
+    }
     d_req_bind[d_paridx].buffer_type = MYSQL_TYPE_LONG;
     d_req_bind[d_paridx].buffer = new unsigned long[1];
     d_req_bind[d_paridx].is_unsigned = 1;
@@ -86,8 +103,11 @@ public:
     return this;
   }
   SSqlStatement* bind(const string& name, long long value) {
-    if (d_paridx >= d_parnum)
+    prepareStatement();
+    if (d_paridx >= d_parnum) {
+      releaseStatement();
       throw SSqlException("Attempt to bind more parameters than query has: " + d_query);
+    }
     d_req_bind[d_paridx].buffer_type = MYSQL_TYPE_LONGLONG;
     d_req_bind[d_paridx].buffer = new long long[1];
     *((long long*)d_req_bind[d_paridx].buffer) = value;
@@ -95,8 +115,11 @@ public:
     return this;
   }
   SSqlStatement* bind(const string& name, unsigned long long value) {
-    if (d_paridx >= d_parnum)
+    prepareStatement();
+    if (d_paridx >= d_parnum) {
+      releaseStatement();
       throw SSqlException("Attempt to bind more parameters than query has: " + d_query);
+    }
     d_req_bind[d_paridx].buffer_type = MYSQL_TYPE_LONGLONG;
     d_req_bind[d_paridx].buffer = new unsigned long long[1];
     d_req_bind[d_paridx].is_unsigned = 1;
@@ -105,8 +128,11 @@ public:
     return this;
   }
   SSqlStatement* bind(const string& name, const std::string& value) {
-    if (d_paridx >= d_parnum)
+    prepareStatement();
+    if (d_paridx >= d_parnum) {
+      releaseStatement();
       throw SSqlException("Attempt to bind more parameters than query has: " + d_query);
+    }
     d_req_bind[d_paridx].buffer_type = MYSQL_TYPE_STRING;
     d_req_bind[d_paridx].buffer = new char[value.size()+1];
     d_req_bind[d_paridx].length = new unsigned long[1];
@@ -118,8 +144,11 @@ public:
     return this;
   }
   SSqlStatement* bindNull(const string& name) { 
-    if (d_paridx >= d_parnum)
+    prepareStatement();
+    if (d_paridx >= d_parnum) {
+      releaseStatement();
       throw SSqlException("Attempt to bind more parameters than query has: " + d_query);
+    }
     d_req_bind[d_paridx].buffer_type = MYSQL_TYPE_NULL;
     d_paridx++;
     return this;
@@ -128,25 +157,31 @@ public:
   SSqlStatement* execute() {
     int err;
 
+    prepareStatement();
+
     if (!d_stmt) return this;
 
     if (d_dolog) {
-      L<<Logger::Warning<<"Query: " << d_query <<endl;
+      g_log<<Logger::Warning<< "Query "<<((long)(void*)this)<<": " << d_query << endl;
+      d_dtime.set();
     }
 
     if ((err = mysql_stmt_bind_param(d_stmt, d_req_bind))) {
       string error(mysql_stmt_error(d_stmt));
+      releaseStatement();
       throw SSqlException("Could not bind mysql statement: " + d_query + string(": ") + error);
     }
 
     if ((err = mysql_stmt_execute(d_stmt))) {
       string error(mysql_stmt_error(d_stmt));
+      releaseStatement();
       throw SSqlException("Could not execute mysql statement: " + d_query + string(": ") + error);
     }
 
     // MySQL documentation says you can call this safely for all queries
     if ((err = mysql_stmt_store_result(d_stmt))) {
       string error(mysql_stmt_error(d_stmt));
+      releaseStatement();
       throw SSqlException("Could not store mysql statement: " + d_query + string(": ") + error);
     }
 
@@ -154,7 +189,7 @@ public:
       // prepare for result
       d_resnum = mysql_stmt_num_rows(d_stmt);
       
-      if (d_resnum>0 && d_res_bind == NULL) {
+      if (d_resnum > 0 && d_res_bind == nullptr) {
         MYSQL_RES* meta = mysql_stmt_result_metadata(d_stmt);
         d_fnum = static_cast<int>(mysql_num_fields(meta)); // ensure correct number of fields
         d_res_bind = new MYSQL_BIND[d_fnum];
@@ -163,6 +198,7 @@ public:
 
         for(int i = 0; i < d_fnum; i++) {
           unsigned long len = std::max(fields[i].max_length, fields[i].length)+1;
+          if (len > 128 * 1024) len = 128 * 1024; // LONGTEXT may tell us it needs 4GB!
           d_res_bind[i].is_null = new my_bool[1];
           d_res_bind[i].error = new my_bool[1];
           d_res_bind[i].length = new unsigned long[1];
@@ -172,29 +208,44 @@ public:
         }
   
         mysql_free_result(meta);
-  
-        if ((err = mysql_stmt_bind_result(d_stmt, d_res_bind))) {
-          string error(mysql_stmt_error(d_stmt));
-          throw SSqlException("Could not bind parameters to mysql statement: " + d_query + string(": ") + error);
-        }
+      }
+
+      /* we need to bind the results array again because a call to mysql_stmt_next_result() followed
+         by a call to mysql_stmt_store_result() might have invalidated it (the first one sets
+         stmt->bind_result_done to false, causing the second to reset the existing binding),
+         and we can't bind it right after the call to mysql_stmt_store_result() if it returned
+         no rows, because then the statement 'contains no metadata' */
+      if (d_res_bind != nullptr && (err = mysql_stmt_bind_result(d_stmt, d_res_bind))) {
+        string error(mysql_stmt_error(d_stmt));
+        releaseStatement();
+        throw SSqlException("Could not bind parameters to mysql statement: " + d_query + string(": ") + error);
       }
     }
+
+    if(d_dolog) 
+      g_log<<Logger::Warning<< "Query "<<((long)(void*)this)<<": "<<d_dtime.udiffNoReset()<<" usec to execute"<<endl;
 
     return this;
   }
 
   bool hasNextRow() {
+    if(d_dolog && d_residx == d_resnum) {
+      g_log<<Logger::Warning<< "Query "<<((long)(void*)this)<<": "<<d_dtime.udiffNoReset()<<" total usec to last row"<<endl;
+    }
     return d_residx < d_resnum;
   }
 
   SSqlStatement* nextRow(row_t& row) {
     int err;
     row.clear();
-    if (!hasNextRow()) return this;
+    if (!hasNextRow()) {
+      return this;
+    }
 
-    if ((err =mysql_stmt_fetch(d_stmt))) {
+    if ((err = mysql_stmt_fetch(d_stmt))) {
       if (err != MYSQL_DATA_TRUNCATED) {
         string error(mysql_stmt_error(d_stmt));
+        releaseStatement();
         throw SSqlException("Could not fetch result: " + d_query + string(": ") + error);
       }
     }
@@ -202,8 +253,8 @@ public:
     row.reserve(d_fnum);
 
     for(int i=0;i<d_fnum;i++) {
-      if (*d_res_bind[i].error) {
-        L<<Logger::Warning<<"Result field at row " << d_residx << " column " << i << " has errno " << *d_res_bind[i].error << endl;
+      if (err == MYSQL_DATA_TRUNCATED && *d_res_bind[i].error) {
+        g_log<<Logger::Warning<<"Result field at row " << d_residx << " column " << i << " has been truncated, we allocated " << d_res_bind[i].buffer_length << " bytes but at least " << *d_res_bind[i].length << " was needed" << endl;
       }
       if (*d_res_bind[i].is_null) {
         row.push_back("");
@@ -220,14 +271,16 @@ public:
       while(!mysql_stmt_next_result(d_stmt)) {
         if ((err = mysql_stmt_store_result(d_stmt))) {
           string error(mysql_stmt_error(d_stmt));
-          throw PDNSException("Could not store mysql statement: " + d_query + string(": ") + error);
+          releaseStatement();
+          throw SSqlException("Could not store mysql statement while processing additional sets: " + d_query + string(": ") + error);
         }
         d_resnum = mysql_stmt_num_rows(d_stmt);
         // XXX: For some reason mysql_stmt_result_metadata returns NULL here, so we cannot
         // ensure row field count matches first result set.
-        if (d_resnum>0) { // ignore empty result set
-          if ((err = mysql_stmt_bind_result(d_stmt, d_res_bind))) {
+        if (d_resnum > 0) { // ignore empty result set
+          if (d_res_bind != nullptr && (err = mysql_stmt_bind_result(d_stmt, d_res_bind))) {
             string error(mysql_stmt_error(d_stmt));
+            releaseStatement();
             throw SSqlException("Could not bind parameters to mysql statement: " + d_query + string(": ") + error);
           }
           d_residx = 0;
@@ -255,13 +308,16 @@ public:
 
   SSqlStatement* reset() {
     if (!d_stmt) return this;
-    int err;
+    int err=0;
     mysql_stmt_free_result(d_stmt);
+#if MYSQL_VERSION_ID >= 50500
     while((err = mysql_stmt_next_result(d_stmt)) == 0) {
       mysql_stmt_free_result(d_stmt);
     }
+#endif
     if (err>0) {
       string error(mysql_stmt_error(d_stmt));
+      releaseStatement();
       throw SSqlException("Could not get next result from mysql statement: " + d_query + string(": ") + error);
     }
     mysql_stmt_reset(d_stmt);
@@ -280,6 +336,43 @@ public:
   const std::string& getQuery() { return d_query; }
 
   ~SMySQLStatement() {
+    releaseStatement();
+  }
+private:
+
+  void prepareStatement() {
+    int err;
+
+    if (d_prepared) return;
+    if (d_query.empty()) {
+      d_prepared = true;
+      return;
+    }
+
+    if ((d_stmt = mysql_stmt_init(d_db))==NULL)
+      throw SSqlException("Could not initialize mysql statement, out of memory: " + d_query);
+
+    if ((err = mysql_stmt_prepare(d_stmt, d_query.c_str(), d_query.size()))) {
+      string error(mysql_stmt_error(d_stmt));
+      releaseStatement();
+      throw SSqlException("Could not prepare statement: " + d_query + string(": ") + error);
+    }
+
+    if (static_cast<int>(mysql_stmt_param_count(d_stmt)) != d_parnum) {
+      releaseStatement();
+      throw SSqlException("Provided parameter count does not match statement: " + d_query);
+    }
+
+    if (d_parnum>0) {
+      d_req_bind = new MYSQL_BIND[d_parnum];
+      memset(d_req_bind, 0, sizeof(MYSQL_BIND)*d_parnum);
+    }
+
+    d_prepared = true;
+  }
+
+  void releaseStatement() {
+    d_prepared = false;
     if (d_stmt)
       mysql_stmt_close(d_stmt);
     d_stmt = NULL;
@@ -295,13 +388,14 @@ public:
       for(int i=0;i<d_fnum;i++) {
         if (d_res_bind[i].buffer) delete [] (char*)d_res_bind[i].buffer;
         if (d_res_bind[i].length) delete [] d_res_bind[i].length;
+        if (d_res_bind[i].error) delete [] d_res_bind[i].error;
         if (d_res_bind[i].is_null) delete [] d_res_bind[i].is_null;
       }
       delete [] d_res_bind;
       d_res_bind = NULL;
     }
+    d_paridx = d_fnum = d_resnum = d_residx = 0;
   }
-private:
   MYSQL* d_db;
 
   MYSQL_STMT* d_stmt;
@@ -310,7 +404,9 @@ private:
 
   string d_query;
   
+  bool d_prepared;
   bool d_dolog;
+  DTime d_dtime; // only used if d_dolog is set
   int d_parnum;
   int d_paridx;
   int d_fnum;
@@ -318,8 +414,7 @@ private:
   int d_residx;
 };
 
-SMySQL::SMySQL(const string &database, const string &host, uint16_t port, const string &msocket, const string &user,
-               const string &password, const string &group, bool setIsolation)
+void SMySQL::connect()
 {
   int retry=1;
 
@@ -330,32 +425,33 @@ SMySQL::SMySQL(const string &database, const string &host, uint16_t port, const 
   do {
 
 #if MYSQL_VERSION_ID >= 50013
-    my_bool reconnect = 1;
+    my_bool reconnect = 0;
     mysql_options(&d_db, MYSQL_OPT_RECONNECT, &reconnect);
 #endif
 
 #if MYSQL_VERSION_ID >= 50100
-    unsigned int timeout = 10;
-    mysql_options(&d_db, MYSQL_OPT_READ_TIMEOUT, &timeout);
-    mysql_options(&d_db, MYSQL_OPT_WRITE_TIMEOUT, &timeout);
+    if(d_timeout) {
+      mysql_options(&d_db, MYSQL_OPT_READ_TIMEOUT, &d_timeout);
+      mysql_options(&d_db, MYSQL_OPT_WRITE_TIMEOUT, &d_timeout);
+    }
 #endif
 
 #if MYSQL_VERSION_ID >= 50500
     mysql_options(&d_db, MYSQL_SET_CHARSET_NAME, MYSQL_AUTODETECT_CHARSET_NAME);
 #endif
 
-    if (setIsolation && (retry == 1))
-      mysql_options(&d_db, MYSQL_INIT_COMMAND,"SET SESSION tx_isolation='READ-COMMITTED'");
+    if (d_setIsolation && (retry == 1))
+      mysql_options(&d_db, MYSQL_INIT_COMMAND,"SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED");
 
-    mysql_options(&d_db, MYSQL_READ_DEFAULT_GROUP, group.c_str());
+    mysql_options(&d_db, MYSQL_READ_DEFAULT_GROUP, d_group.c_str());
 
-    if (!mysql_real_connect(&d_db, host.empty() ? NULL : host.c_str(),
-                          user.empty() ? NULL : user.c_str(),
-                          password.empty() ? NULL : password.c_str(),
-                          database.empty() ? NULL : database.c_str(),
-                          port,
-                          msocket.empty() ? NULL : msocket.c_str(),
-                          CLIENT_MULTI_RESULTS)) {
+    if (!mysql_real_connect(&d_db, d_host.empty() ? NULL : d_host.c_str(),
+                            d_user.empty() ? NULL : d_user.c_str(),
+                            d_password.empty() ? NULL : d_password.c_str(),
+                            d_database.empty() ? NULL : d_database.c_str(),
+                            d_port,
+                            d_msocket.empty() ? NULL : d_msocket.c_str(),
+                            CLIENT_MULTI_RESULTS)) {
 
       if (retry == 0)
         throw sPerrorException("Unable to connect to database");
@@ -368,6 +464,13 @@ SMySQL::SMySQL(const string &database, const string &host, uint16_t port, const 
       retry=-1;
     }
   } while (retry >= 0);
+}
+
+SMySQL::SMySQL(const string &database, const string &host, uint16_t port, const string &msocket, const string &user,
+               const string &password, const string &group, bool setIsolation, unsigned int timeout):
+  d_database(database), d_host(host), d_msocket(msocket), d_user(user), d_password(password), d_group(group), d_timeout(timeout), d_port(port), d_setIsolation(setIsolation)
+{
+  connect();
 }
 
 void SMySQL::setLog(bool state)
@@ -385,19 +488,19 @@ SSqlException SMySQL::sPerrorException(const string &reason)
   return SSqlException(reason+string(": ")+mysql_error(&d_db));
 }
 
-SSqlStatement* SMySQL::prepare(const string& query, int nparams)
+std::unique_ptr<SSqlStatement> SMySQL::prepare(const string& query, int nparams)
 {
-  return new SMySQLStatement(query, s_dolog, nparams, &d_db);
+  return std::unique_ptr<SSqlStatement>(new SMySQLStatement(query, s_dolog, nparams, &d_db));
 }
 
 void SMySQL::execute(const string& query)
 {
   if(s_dolog)
-    L<<Logger::Warning<<"Query: "<<query<<endl;
+    g_log<<Logger::Warning<<"Query: "<<query<<endl;
 
   int err;
   if((err=mysql_query(&d_db,query.c_str())))
-    throw sPerrorException("Failed to execute mysql_query '" + query + "', perhaps connection died? Err="+itoa(err));
+    throw sPerrorException("Failed to execute mysql_query '" + query + "' Err="+itoa(err));
 }
 
 void SMySQL::startTransaction() {
@@ -410,4 +513,27 @@ void SMySQL::commit() {
 
 void SMySQL::rollback() {
   execute("rollback");
+}
+
+bool SMySQL::isConnectionUsable()
+{
+  bool usable = false;
+  int sd = d_db.net.fd;
+  bool wasNonBlocking = isNonBlocking(sd);
+
+  if (!wasNonBlocking) {
+    if (!setNonBlocking(sd)) {
+      return usable;
+    }
+  }
+
+  usable = isTCPSocketUsable(sd);
+
+  if (!wasNonBlocking) {
+    if (!setBlocking(sd)) {
+      usable = false;
+    }
+  }
+
+  return usable;
 }

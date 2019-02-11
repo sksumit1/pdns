@@ -1,24 +1,24 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2002-2011  PowerDNS.COM BV
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2 as 
-    published by the Free Software Foundation; 
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -36,12 +36,12 @@
 #include "dns.hh"
 #include "arguments.hh"
 #include "packetcache.hh"
-#include <boost/lexical_cast.hpp>
+#include "threadname.hh"
 
-// #include "namespaces.hh"
-
+// there can be MANY OF THESE
 void CommunicatorClass::retrievalLoopThread(void)
 {
+  setThreadName("pdns/comm-retre");
   for(;;) {
     d_suck_sem.wait();
     SuckRequest sr;
@@ -53,7 +53,23 @@ void CommunicatorClass::retrievalLoopThread(void)
       sr=d_suckdomains.front();
       d_suckdomains.pop_front();
     }
-    suck(sr.domain,sr.master);
+    suck(sr.domain, sr.master);
+  }
+}
+
+void CommunicatorClass::loadArgsIntoSet(const char *listname, set<string> &listset)
+{
+  vector<string> parts;
+  stringtok(parts, ::arg()[listname], ", \t");
+  for (vector<string>::const_iterator iter = parts.begin(); iter != parts.end(); ++iter) {
+    try {
+      ComboAddress caIp(*iter, 53);
+      listset.insert(caIp.toStringWithPort());
+    }
+    catch(PDNSException &e) {
+      g_log<<Logger::Error<<"Unparseable IP in "<<listname<<". Error: "<<e.reason<<endl;
+      _exit(1);
+    }
   }
 }
 
@@ -63,8 +79,8 @@ void CommunicatorClass::go()
     PacketHandler::s_allowNotifyFrom.toMasks(::arg()["allow-notify-from"] );
   }
   catch(PDNSException &e) {
-    L<<Logger::Error<<"Unparseable IP in allow-notify-from. Error: "<<e.reason<<endl;
-    exit(1);
+    g_log<<Logger::Error<<"Unparseable IP in allow-notify-from. Error: "<<e.reason<<endl;
+    _exit(1);
   }
 
   pthread_t tid;
@@ -78,29 +94,21 @@ void CommunicatorClass::go()
     d_onlyNotify.toMasks(::arg()["only-notify"]);
   }
   catch(PDNSException &e) {
-    L<<Logger::Error<<"Unparseable IP in only-notify. Error: "<<e.reason<<endl;
-    exit(1);
+    g_log<<Logger::Error<<"Unparseable IP in only-notify. Error: "<<e.reason<<endl;
+    _exit(1);
   }
 
-  vector<string> parts;
-  stringtok(parts, ::arg()["also-notify"], ", \t");
-  for (vector<string>::const_iterator iter = parts.begin(); iter != parts.end(); ++iter) {
-    try {
-      ComboAddress caIp(*iter, 53);
-      d_alsoNotify.insert(caIp.toStringWithPort());
-    }
-    catch(PDNSException &e) {
-      L<<Logger::Error<<"Unparseable IP in also-notify. Error: "<<e.reason<<endl;
-      exit(1);
-    }
-  }
+  loadArgsIntoSet("also-notify", d_alsoNotify);
+
+  loadArgsIntoSet("forward-notify", PacketHandler::s_forwardNotify);
 }
 
 void CommunicatorClass::mainloop(void)
 {
   try {
+    setThreadName("pdns/comm-main");
     signal(SIGPIPE,SIG_IGN);
-    L<<Logger::Error<<"Master/slave communicator launching"<<endl;
+    g_log<<Logger::Error<<"Master/slave communicator launching"<<endl;
     PacketHandler P;
     d_tickinterval=::arg().asNum("slave-cycle-interval");
     makeNotifySockets();
@@ -120,8 +128,17 @@ void CommunicatorClass::mainloop(void)
       while(time(0) < next) {
         rc=d_any_sem.tryWait();
 
-        if(rc)
+        if(rc) {
+          bool extraSlaveRefresh = false;
           Utility::sleep(1);
+          {
+            Lock l(&d_lock);
+            if (d_tocheck.size())
+              extraSlaveRefresh = true;
+          }
+          if (extraSlaveRefresh)
+            slaveRefresh(&P);
+        }
         else { 
           break; // something happened
         }
@@ -131,18 +148,18 @@ void CommunicatorClass::mainloop(void)
     }
   }
   catch(PDNSException &ae) {
-    L<<Logger::Error<<"Exiting because communicator thread died with error: "<<ae.reason<<endl;
+    g_log<<Logger::Error<<"Exiting because communicator thread died with error: "<<ae.reason<<endl;
     Utility::sleep(1);
-    exit(1);
+    _exit(1);
   }
   catch(std::exception &e) {
-    L<<Logger::Error<<"Exiting because communicator thread died with STL error: "<<e.what()<<endl;
-    exit(1);
+    g_log<<Logger::Error<<"Exiting because communicator thread died with STL error: "<<e.what()<<endl;
+    _exit(1);
   }
   catch( ... )
   {
-    L << Logger::Error << "Exiting because communicator caught unknown exception." << endl;
-    exit(1);
+    g_log << Logger::Error << "Exiting because communicator caught unknown exception." << endl;
+    _exit(1);
   }
 }
 

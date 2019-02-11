@@ -1,3 +1,24 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -11,7 +32,7 @@
 #include "logger.hh"
 #include "lock.hh"
 #include "arguments.hh"
-#include <boost/foreach.hpp>
+
 #include <boost/shared_ptr.hpp>
 #include <boost/make_shared.hpp>
 #include "gss_context.hh"
@@ -19,14 +40,14 @@
 #ifndef ENABLE_GSS_TSIG
 
 bool GssContext::supported() { return false; }
-GssContext::GssContext() {};
-GssContext::GssContext(const std::string& label) {};
+GssContext::GssContext() : d_error(GSS_CONTEXT_UNSUPPORTED), d_type(GSS_CONTEXT_NONE) {}
+GssContext::GssContext(const DNSName& label) : d_error(GSS_CONTEXT_UNSUPPORTED), d_type(GSS_CONTEXT_NONE) {}
 void GssContext::setLocalPrincipal(const std::string& name) {}
 bool GssContext::getLocalPrincipal(std::string& name) { return false; }
 void GssContext::setPeerPrincipal(const std::string& name) {}
 bool GssContext::getPeerPrincipal(std::string& name) { return false; }
 void GssContext::generateLabel(const std::string& suffix) {}
-void GssContext::setLabel(const std::string& label) {}
+void GssContext::setLabel(const DNSName& label) {}
 bool GssContext::init(const std::string &input, std::string& output) { return false; }
 bool GssContext::accept(const std::string &input, std::string& output) { return false; }
 bool GssContext::destroy() { return false; }
@@ -40,14 +61,9 @@ GssContextError GssContext::getError() { return GSS_CONTEXT_UNSUPPORTED; }
 
 class GssCredential : boost::noncopyable {
 public:
-  GssCredential(const std::string& name, const gss_cred_usage_t usage) {
+  GssCredential(const std::string& name, const gss_cred_usage_t usage) :
+    d_valid(false), d_nameS(name), d_name(GSS_C_NO_NAME), d_cred(GSS_C_NO_CREDENTIAL), d_usage(usage) {
     gss_buffer_desc buffer;
-    d_name = GSS_C_NO_NAME;
-    d_nameS = name;
-    d_cred = GSS_C_NO_CREDENTIAL;
-
-    d_usage = usage;
-    d_valid = false;
     
     if (name.empty() == false) {
       buffer.length = name.size();
@@ -116,7 +132,7 @@ std::map<std::string, boost::shared_ptr<GssCredential> > s_gss_init_creds;
 
 class GssSecContext : boost::noncopyable {
 public:
-  GssSecContext(const std::string& label, boost::shared_ptr<GssCredential> cred) {    
+  GssSecContext(boost::shared_ptr<GssCredential> cred) {
     if (cred->valid() == false) throw PDNSException("Invalid credential " + cred->d_nameS);
     d_cred = cred;
     d_state = GssStateInitial;
@@ -153,12 +169,11 @@ public:
 
 };
 
-std::map<std::string, boost::shared_ptr<GssSecContext> > s_gss_sec_context;
+std::map<DNSName, boost::shared_ptr<GssSecContext> > s_gss_sec_context;
 
 bool GssContext::supported() { return true; }
 
 void GssContext::initialize() {
-  d_label = "";
   d_peerPrincipal = "";
   d_localPrincipal = "";
   d_error = GSS_CONTEXT_NO_ERROR;
@@ -167,21 +182,21 @@ void GssContext::initialize() {
 
 GssContext::GssContext() {
   initialize();
-  generateLabel("pdns.tsig");
+  generateLabel("pdns.tsig.");
 }
 
-GssContext::GssContext(const std::string& label) {
+GssContext::GssContext(const DNSName& label) {
   initialize();
-  setLabel(toLowerCanonic(label));
+  setLabel(label);
 }
 
 void GssContext::generateLabel(const std::string& suffix) {
   std::ostringstream oss;
   oss << std::hex << time((time_t*)NULL) << "." << suffix;
-  setLabel(oss.str());
+  setLabel(DNSName(oss.str()));
 }
 
-void GssContext::setLabel(const std::string& label) {
+void GssContext::setLabel(const DNSName& label) {
   d_label = label;
   if (s_gss_sec_context.find(d_label) != s_gss_sec_context.end()) {
     d_ctx = s_gss_sec_context[d_label];
@@ -227,7 +242,7 @@ bool GssContext::init(const std::string &input, std::string& output) {
     }
   } else {
     // make context
-    s_gss_sec_context[d_label] = boost::make_shared<GssSecContext>(d_label, cred);
+    s_gss_sec_context[d_label] = boost::make_shared<GssSecContext>(cred);
     s_gss_sec_context[d_label]->d_type = d_type;
     d_ctx = s_gss_sec_context[d_label];
     d_ctx->d_state = GssSecContext::GssStateNegotiate;
@@ -298,7 +313,7 @@ bool GssContext::accept(const std::string &input, std::string& output) {
     } 
   } else {
     // make context
-    s_gss_sec_context[d_label] = boost::make_shared<GssSecContext>(d_label, cred);
+    s_gss_sec_context[d_label] = boost::make_shared<GssSecContext>(cred);
     s_gss_sec_context[d_label]->d_type = d_type;
     d_ctx = s_gss_sec_context[d_label];
     d_ctx->d_state = GssSecContext::GssStateNegotiate;
@@ -434,19 +449,19 @@ void GssContext::processError(const std::string& method, OM_uint32 maj, OM_uint3
 
 bool gss_add_signature(const DNSName& context, const std::string& message, std::string& mac) {
   string tmp_mac;
-  GssContext gssctx(context.toStringNoDot());
+  GssContext gssctx(context);
   if (!gssctx.valid()) {
-    L<<Logger::Error<<"GSS context '"<<context<<"' is not valid"<<endl;
-    BOOST_FOREACH(const string& error, gssctx.getErrorStrings()) {
-       L<<Logger::Error<<"GSS error: "<<error<<endl;;
+    g_log<<Logger::Error<<"GSS context '"<<context<<"' is not valid"<<endl;
+    for(const string& error :  gssctx.getErrorStrings()) {
+       g_log<<Logger::Error<<"GSS error: "<<error<<endl;;
     }
     return false;
   }
 
   if (!gssctx.sign(message, tmp_mac)) {
-    L<<Logger::Error<<"Could not sign message using GSS context '"<<context<<"'"<<endl;
-    BOOST_FOREACH(const string& error, gssctx.getErrorStrings()) {
-       L<<Logger::Error<<"GSS error: "<<error<<endl;;
+    g_log<<Logger::Error<<"Could not sign message using GSS context '"<<context<<"'"<<endl;
+    for(const string& error :  gssctx.getErrorStrings()) {
+       g_log<<Logger::Error<<"GSS error: "<<error<<endl;;
     }
     return false;
   }
@@ -455,19 +470,19 @@ bool gss_add_signature(const DNSName& context, const std::string& message, std::
 }
 
 bool gss_verify_signature(const DNSName& context, const std::string& message, const std::string& mac) {
-  GssContext gssctx(context.toStringNoDot());
+  GssContext gssctx(context);
   if (!gssctx.valid()) {
-    L<<Logger::Error<<"GSS context '"<<context<<"' is not valid"<<endl;
-    BOOST_FOREACH(const string& error, gssctx.getErrorStrings()) {
-       L<<Logger::Error<<"GSS error: "<<error<<endl;;
+    g_log<<Logger::Error<<"GSS context '"<<context<<"' is not valid"<<endl;
+    for(const string& error :  gssctx.getErrorStrings()) {
+       g_log<<Logger::Error<<"GSS error: "<<error<<endl;;
     }
     return false;
   }
 
   if (!gssctx.verify(message, mac)) {
-    L<<Logger::Error<<"Could not verify message using GSS context '"<<context<<"'"<<endl;
-    BOOST_FOREACH(const string& error, gssctx.getErrorStrings()) {
-       L<<Logger::Error<<"GSS error: "<<error<<endl;;
+    g_log<<Logger::Error<<"Could not verify message using GSS context '"<<context<<"'"<<endl;
+    for(const string& error :  gssctx.getErrorStrings()) {
+       g_log<<Logger::Error<<"GSS error: "<<error<<endl;;
     }
     return false;
   }

@@ -1,24 +1,24 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2002-2010  PowerDNS.COM BV
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2
-    as published by the Free Software Foundation
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifndef DNSBACKEND_HH
 #define DNSBACKEND_HH
 
@@ -42,16 +42,17 @@ class DNSPacket;
 #include "comment.hh"
 #include "dnsname.hh"
 #include "dnsrecords.hh"
+#include "iputils.hh"
 
 class DNSBackend;  
 struct DomainInfo
 {
-  DomainInfo() : backend(0) {}
+  DomainInfo() : last_check(0), backend(NULL), id(0), notified_serial(0), serial(0), kind(DomainInfo::Native) {}
 
   DNSName zone;
   time_t last_check;
   string account;
-  vector<string> masters;
+  vector<ComboAddress> masters; 
   DNSBackend *backend;
 
   uint32_t id;
@@ -86,6 +87,15 @@ struct DomainInfo
       return DomainInfo::Native;
   }
 
+  bool isMaster(const ComboAddress& ip) const
+  {
+    for( const auto& master: masters) {
+      if(ComboAddress::addressOnlyEqual()(ip, master))
+        return true;
+    }
+    return false;
+  }
+
 };
 
 struct TSIGKey {
@@ -96,7 +106,7 @@ struct TSIGKey {
 
 class DNSPacket;
 
-//! This virtual base class defines the interface for backends for the ahudns.
+//! This virtual base class defines the interface for backends for PowerDNS.
 /** To create a backend, inherit from this class and implement functions for all virtual methods.
     Methods should not throw an exception if they are sure they did not find the requested data. However,
     if an error occurred which prevented them temporarily from performing a lockup, they should throw a DBException,
@@ -113,6 +123,7 @@ public:
   //! lookup() initiates a lookup. A lookup without results should not throw!
   virtual void lookup(const QType &qtype, const DNSName &qdomain, DNSPacket *pkt_p=0, int zoneId=-1)=0; 
   virtual bool get(DNSResourceRecord &)=0; //!< retrieves one DNSResource record, returns false if no more were available
+  virtual bool get(DNSZoneRecord &r);
 
   //! Initiates a list of the specified domain
   /** Once initiated, DNSResourceRecord objects can be retrieved using get(). Should return false
@@ -124,10 +135,7 @@ public:
   virtual ~DNSBackend(){};
 
   //! fills the soadata struct with the SOA details. Returns false if there is no SOA.
-  virtual bool getSOA(const DNSName &name, SOAData &soadata, DNSPacket *p=0);
-
-  //! Calculates a SOA serial for the zone and stores it in the third argument.
-  virtual bool calculateSOASerial(const DNSName& domain, const SOAData& sd, time_t& serial);
+  virtual bool getSOA(const DNSName &name, SOAData &soadata);
 
   virtual bool replaceRRSet(uint32_t domain_id, const DNSName& qname, const QType& qt, const vector<DNSResourceRecord>& rrset)
   {
@@ -168,7 +176,7 @@ public:
   virtual void getAllDomains(vector<DomainInfo> *domains, bool include_disabled=false) { }
 
   /** Determines if we are authoritative for a zone, and at what level */
-  virtual bool getAuth(DNSPacket *p, SOAData *sd, const DNSName &target, const int best_match_len);
+  virtual bool getAuth(const DNSName &target, SOAData *sd);
 
   struct KeyData {
     std::string content;
@@ -177,9 +185,9 @@ public:
     bool active;
   };
 
-  virtual bool getDomainKeys(const DNSName& name, unsigned int kind, std::vector<KeyData>& keys) { return false;}
+  virtual bool getDomainKeys(const DNSName& name, std::vector<KeyData>& keys) { return false;}
   virtual bool removeDomainKey(const DNSName& name, unsigned int id) { return false; }
-  virtual int addDomainKey(const DNSName& name, const KeyData& key){ return -1; }
+  virtual bool addDomainKey(const DNSName& name, const KeyData& key, int64_t& id){ return false; }
   virtual bool activateDomainKey(const DNSName& name, unsigned int id) { return false; }
   virtual bool deactivateDomainKey(const DNSName& name, unsigned int id) { return false; }
 
@@ -188,7 +196,7 @@ public:
   virtual bool deleteTSIGKey(const DNSName& name) { return false; }
   virtual bool getTSIGKeys(std::vector< struct TSIGKey > &keys) { return false; }
 
-  virtual bool getBeforeAndAfterNamesAbsolute(uint32_t id, const string& qname, DNSName& unhashed, string& before, string& after)
+  virtual bool getBeforeAndAfterNamesAbsolute(uint32_t id, const DNSName& qname, DNSName& unhashed, DNSName& before, DNSName& after)
   {
     std::cerr<<"Default beforeAndAfterAbsolute called!"<<std::endl;
     abort();
@@ -197,12 +205,12 @@ public:
 
   virtual bool getBeforeAndAfterNames(uint32_t id, const DNSName& zonename, const DNSName& qname, DNSName& before, DNSName& after);
 
-  virtual bool updateDNSSECOrderNameAndAuth(uint32_t domain_id, const DNSName& zonename, const DNSName& qname, const DNSName& ordername, bool auth, const uint16_t qtype=QType::ANY)
+  virtual bool updateDNSSECOrderNameAndAuth(uint32_t domain_id, const DNSName& qname, const DNSName& ordername, bool auth, const uint16_t qtype=QType::ANY)
   {
     return false;
   }
 
-  virtual bool updateEmptyNonTerminals(uint32_t domain_id, const DNSName& zonename, set<DNSName>& insert, set<DNSName>& erase, bool remove)
+  virtual bool updateEmptyNonTerminals(uint32_t domain_id, set<DNSName>& insert, set<DNSName>& erase, bool remove)
   {
     return false;
   }
@@ -235,11 +243,6 @@ public:
   }
 
   //! returns true if master ip is master for domain name.
-  virtual bool isMaster(const DNSName &name, const string &ip)
-  {
-    return false;
-  }
-  
   //! starts the transaction for updating domain qname (FIXME: what is id?)
   virtual bool startTransaction(const DNSName &qname, int id=-1)
   {
@@ -267,7 +270,7 @@ public:
   }
 
   //! feeds a record to a zone, needs a call to startTransaction first
-  virtual bool feedRecord(const DNSResourceRecord &rr, string *ordername=0)
+  virtual bool feedRecord(const DNSResourceRecord &rr, const DNSName &ordername)
   {
     return false; // no problem!
   }
@@ -281,7 +284,7 @@ public:
   }
 
   //! if this returns true, DomainInfo di contains information about the domain
-  virtual bool getDomainInfo(const DNSName &domain, DomainInfo &di)
+  virtual bool getDomainInfo(const DNSName &domain, DomainInfo &di, bool getSerial=true)
   {
     return false;
   }
@@ -355,17 +358,6 @@ public:
     return false;
   }
 
-  //! called to get a NSECx record from backend
-  virtual bool getDirectNSECx(uint32_t id, const string &hashed, const QType &qtype, DNSName &before, DNSResourceRecord &rr)
-  {
-    return false;
-  }
-  //! called to get RRSIG record(s) from backend
-  virtual bool getDirectRRSIGs(const DNSName &signer, const DNSName &qname, const QType &qtype, vector<DNSResourceRecord> &rrsigs)
-  {
-    return false;
-  }
-
   virtual string directBackendCmd(const string &query)
   {
     return "directBackendCmd not supported for this backend\n";
@@ -391,37 +383,6 @@ protected:
 
 private:
   string d_prefix;
-};
-
-class DNSReversedBackend : public DNSBackend {
-    public:
-        /* Given rev_zone (the reversed name of the zone we are looking for the
-         * SOA record for), return the equivalent of
-         *     SELECT name
-         *     FROM soa_records
-         *     WHERE name <= rev_zone
-         *     ORDER BY name DESC
-         *
-         * ie we want either an exact hit on the record, or the immediately
-         * preceding record when sorted lexographically.
-         *
-         * Return true if something has been found, false if not
-         */
-        virtual bool getAuthZone( string &rev_zone ) { return false; };  // Must be overridden
-
-        /* Once the record has been found, this will be called to get the data
-         * associated with the record so the backend can set up soa.
-         * soa->qname does not need to be set. Return false if
-         * there is a problem getting the data.
-         * */
-        virtual bool getAuthData( SOAData &soa, DNSPacket *p=0) { return false; };  // Must be overridden
-
-        virtual bool getAuth(DNSPacket *p, SOAData *soa, const DNSName &inZone, const int best_match_len) override;
-        inline int _getAuth(DNSPacket *p, SOAData *soa, const string &inZone, const string &querykey, const int best_match_len);
-
-        /* Only called for stuff like signing or AXFR transfers */
-        bool _getSOA(const string &rev_zone, SOAData &soa, DNSPacket *p);
-        virtual bool getSOA(const DNSName &inZone, SOAData &soa, DNSPacket *p) override;
 };
 
 class BackendFactory
@@ -467,8 +428,14 @@ extern BackendMakerClass &BackendMakers();
 class DBException : public PDNSException
 {
 public:
-  DBException(const string &reason) : PDNSException(reason){}
+  DBException(const string &reason_) : PDNSException(reason_){}
 };
 
+/** helper function for both DNSPacket and addSOARecord() - converts a line into a struct, for easier parsing */
+void fillSOAData(const string &content, SOAData &data);
+// same but more karmic
+void fillSOAData(const DNSZoneRecord& in, SOAData& data);
+// the reverse
+std::shared_ptr<DNSRecordContent> makeSOAContent(const SOAData& sd);
 
 #endif

@@ -1,3 +1,24 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #define __FAVOR_BSD
 #ifdef HAVE_CONFIG_H
 #include "config.h"
@@ -79,10 +100,31 @@ void makeReport(const struct pdns_timeval& tv)
   g_skipped=0;
 }
 
+void usage() {
+  cerr<<"syntax: dnsgram INFILE..."<<endl;
+}
 
 int main(int argc, char** argv)
 try
 {
+  // Parse possible options
+  if (argc == 1) {
+    usage();
+    return EXIT_SUCCESS;
+  }
+
+  for(int n=1 ; n < argc; ++n) {
+    if ((string) argv[n] == "--help") {
+      usage();
+      return EXIT_SUCCESS;
+    }
+
+    if ((string) argv[n] == "--version") {
+      cerr<<"dnsgram "<<VERSION<<endl;
+      return EXIT_SUCCESS;
+    }
+  }
+
   reportAllTypes();
   for(int n=1 ; n < argc; ++n) {
     cout<<argv[n]<<endl;
@@ -99,7 +141,7 @@ try
     /* we measure every 60 seconds, each interval with 10% less answers than questions is interesting */
     /* report chunked */
     
-    struct pdns_timeval lastreport={0, 0};
+    struct pdns_timeval lastreport;
     
     typedef set<pair<DNSName, uint16_t> > queries_t;
     queries_t questions, answers;
@@ -115,7 +157,7 @@ try
           ntohs(pr.d_udp->uh_dport)==53   || ntohs(pr.d_udp->uh_sport)==53) &&
          pr.d_len > 12) {
         try {
-          MOADNSParser mdp((const char*)pr.d_payload, pr.d_len);
+          MOADNSParser mdp(false, (const char*)pr.d_payload, pr.d_len);
 
           if(lastreport.tv_sec == 0) {
             lastreport = pr.d_pheader.ts;
@@ -152,7 +194,7 @@ try
             lastreport = pr.d_pheader.ts;
           }          
         }
-        catch(MOADNSException& mde) {
+        catch(const MOADNSException &mde) {
           //        cerr<<"error parsing packet: "<<mde.what()<<endl;
           parseErrors++;
           continue;
@@ -190,7 +232,7 @@ try
     ofstream failed("failed");
     failed<<"name\ttype\tnumber\n";
     for(diff_t::const_iterator i = diff.begin(); i != diff.end() ; ++i) {
-      failed << i->first.toString() << "\t" << DNSRecordContent::NumberToType(i->second) << "\t"<< counts[make_pair(i->first, i->second)]<<"\n";
+      failed << i->first << "\t" << DNSRecordContent::NumberToType(i->second) << "\t"<< counts[make_pair(i->first, i->second)]<<"\n";
     }
 
     diff.clear();
@@ -202,7 +244,7 @@ try
     ofstream succeeded("succeeded");
     succeeded<<"name\ttype\tnumber\n";
     for(queries_t::const_iterator i = answers.begin(); i != answers.end() ; ++i) {
-      succeeded << i->first.toString() << "\t" <<DNSRecordContent::NumberToType(i->second) << "\t" << counts[make_pair(i->first, i->second)]<<"\n";
+      succeeded << i->first << "\t" <<DNSRecordContent::NumberToType(i->second) << "\t" << counts[make_pair(i->first, i->second)]<<"\n";
     }
   }
 }

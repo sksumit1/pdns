@@ -1,24 +1,25 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2002-2012  PowerDNS.COM BV
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2 as 
-    published by the Free Software Foundation.
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
 #ifndef PDNS_BINDBACKEND_HH
 #define PDNS_BINDBACKEND_HH
 
@@ -33,6 +34,7 @@
 #include <boost/tuple/tuple.hpp>
 #include <boost/tuple/tuple_comparison.hpp>
 #include <boost/multi_index_container.hpp>
+#include <boost/multi_index/hashed_index.hpp>
 #include <boost/multi_index/ordered_index.hpp>
 #include <boost/multi_index/identity.hpp>
 #include <boost/multi_index/member.hpp>
@@ -85,13 +87,15 @@ struct Bind2DNSCompare : std::less<Bind2DNSRecord>
     {return a.qname.canonCompare(b.qname);}
 };
 
-struct HashedTag{};
+struct NSEC3Tag{};
+struct UnorderedNameTag{};
 
 typedef multi_index_container<
   Bind2DNSRecord,
   indexed_by  <
                 ordered_non_unique<identity<Bind2DNSRecord>, Bind2DNSCompare >,
-                ordered_non_unique<tag<HashedTag>, member<Bind2DNSRecord, std::string, &Bind2DNSRecord::nsec3hash> >
+                hashed_non_unique<tag<UnorderedNameTag>, member<Bind2DNSRecord, DNSName, &Bind2DNSRecord::qname> >,
+                ordered_non_unique<tag<NSEC3Tag>, member<Bind2DNSRecord, std::string, &Bind2DNSRecord::nsec3hash> >
               >
 > recordstorage_t;
 
@@ -155,9 +159,10 @@ public:
   void setCheckInterval(time_t seconds);
 
   DNSName d_name;   //!< actual name of the domain
+  DomainInfo::DomainKind d_kind; //!< the kind of domain
   string d_filename; //!< full absolute filename of the zone on disk
   string d_status; //!< message describing status of a domain, for human consumption
-  vector<string> d_masters;     //!< IP address of the master of this domain
+  vector<ComboAddress> d_masters;     //!< IP address of the master of this domain
   set<string> d_also_notify; //!< IP list of hosts to also notify
   LookButDontTouch<recordstorage_t> d_records;  //!< the actual records belonging to this domain
   time_t d_ctime;  //!< last known ctime of the file on disk
@@ -166,6 +171,7 @@ public:
   unsigned int d_id;  //!< internal id of the domain
   mutable bool d_checknow; //!< if this domain has been flagged for a check
   bool d_loaded;  //!< if a domain is loaded
+  bool d_wasRejectedLastReload{false}; //!< if the domain was rejected during Bind2Backend::queueReloadAndStore
 
 private:
   time_t getCtime();
@@ -183,43 +189,43 @@ class Bind2Backend : public DNSBackend
 public:
   Bind2Backend(const string &suffix="", bool loadZones=true); 
   ~Bind2Backend();
-  void getUnfreshSlaveInfos(vector<DomainInfo> *unfreshDomains);
-  void getUpdatedMasters(vector<DomainInfo> *changedDomains);
-  bool getDomainInfo(const DNSName &domain, DomainInfo &di);
+  void getUnfreshSlaveInfos(vector<DomainInfo> *unfreshDomains) override;
+  void getUpdatedMasters(vector<DomainInfo> *changedDomains) override;
+  bool getDomainInfo(const DNSName &domain, DomainInfo &di, bool getSerial=true ) override;
   time_t getCtime(const string &fname);
    // DNSSEC
-  virtual bool getBeforeAndAfterNamesAbsolute(uint32_t id, const string& qname, DNSName& unhashed, string& before, string& after);
-  void lookup(const QType &, const DNSName &qdomain, DNSPacket *p=0, int zoneId=-1);
-  bool list(const DNSName &target, int id, bool include_disabled=false);
-  bool get(DNSResourceRecord &);
-  void getAllDomains(vector<DomainInfo> *domains, bool include_disabled=false);
+  bool getBeforeAndAfterNamesAbsolute(uint32_t id, const DNSName& qname, DNSName& unhashed, DNSName& before, DNSName& after) override;
+  void lookup(const QType &, const DNSName &qdomain, DNSPacket *p=0, int zoneId=-1) override;
+  bool list(const DNSName &target, int id, bool include_disabled=false) override;
+  bool get(DNSResourceRecord &) override;
+  void getAllDomains(vector<DomainInfo> *domains, bool include_disabled=false) override;
 
   static DNSBackend *maker();
   static pthread_mutex_t s_startup_lock;
 
-  void setFresh(uint32_t domain_id);
-  void setNotified(uint32_t id, uint32_t serial);
-  bool startTransaction(const DNSName &qname, int id);
-  bool feedRecord(const DNSResourceRecord &rr, string *ordername=0);
-  bool commitTransaction();
-  bool abortTransaction();
-  void alsoNotifies(const DNSName &domain, set<string> *ips);
-  bool searchRecords(const string &pattern, int maxResults, vector<DNSResourceRecord>& result);
+  void setFresh(uint32_t domain_id) override;
+  void setNotified(uint32_t id, uint32_t serial) override;
+  bool startTransaction(const DNSName &qname, int id) override;
+  bool feedRecord(const DNSResourceRecord &rr, const DNSName &ordername) override;
+  bool commitTransaction() override;
+  bool abortTransaction() override;
+  void alsoNotifies(const DNSName &domain, set<string> *ips) override;
+  bool searchRecords(const string &pattern, int maxResults, vector<DNSResourceRecord>& result) override;
 
 // the DNSSEC related (getDomainMetadata has broader uses too)
-  virtual bool getAllDomainMetadata(const DNSName& name, std::map<std::string, std::vector<std::string> >& meta);
-  virtual bool getDomainMetadata(const DNSName& name, const std::string& kind, std::vector<std::string>& meta);
-  virtual bool setDomainMetadata(const DNSName& name, const std::string& kind, const std::vector<std::string>& meta);
-  virtual bool getDomainKeys(const DNSName& name, unsigned int kind, std::vector<KeyData>& keys);
-  virtual bool removeDomainKey(const DNSName& name, unsigned int id);
-  virtual int addDomainKey(const DNSName& name, const KeyData& key);
-  virtual bool activateDomainKey(const DNSName& name, unsigned int id);
-  virtual bool deactivateDomainKey(const DNSName& name, unsigned int id);
-  virtual bool getTSIGKey(const DNSName& name, DNSName* algorithm, string* content);
-  virtual bool setTSIGKey(const DNSName& name, const DNSName& algorithm, const string& content);
-  virtual bool deleteTSIGKey(const DNSName& name);
-  virtual bool getTSIGKeys(std::vector< struct TSIGKey > &keys);
-  virtual bool doesDNSSEC();
+  bool getAllDomainMetadata(const DNSName& name, std::map<std::string, std::vector<std::string> >& meta) override;
+  bool getDomainMetadata(const DNSName& name, const std::string& kind, std::vector<std::string>& meta) override;
+  bool setDomainMetadata(const DNSName& name, const std::string& kind, const std::vector<std::string>& meta) override;
+  bool getDomainKeys(const DNSName& name, std::vector<KeyData>& keys) override;
+  bool removeDomainKey(const DNSName& name, unsigned int id) override;
+  bool addDomainKey(const DNSName& name, const KeyData& key, int64_t& id) override;
+  bool activateDomainKey(const DNSName& name, unsigned int id) override;
+  bool deactivateDomainKey(const DNSName& name, unsigned int id) override;
+  bool getTSIGKey(const DNSName& name, DNSName* algorithm, string* content) override;
+  bool setTSIGKey(const DNSName& name, const DNSName& algorithm, const string& content) override;
+  bool deleteTSIGKey(const DNSName& name) override;
+  bool getTSIGKeys(std::vector< struct TSIGKey > &keys) override;
+  bool doesDNSSEC() override;
   // end of DNSSEC 
 
   typedef multi_index_container < BB2DomainInfo , 
@@ -231,14 +237,13 @@ public:
 
   void parseZoneFile(BB2DomainInfo *bbd);
   void insertRecord(BB2DomainInfo& bbd, const DNSName &qname, const QType &qtype, const string &content, int ttl, const std::string& hashed=string(), bool *auth=0);
-  void rediscover(string *status=0);
+  void rediscover(string *status=0) override;
 
-  bool isMaster(const DNSName &name, const string &ip);
 
   // for supermaster support
-  bool superMasterBackend(const string &ip, const DNSName &domain, const vector<DNSResourceRecord>&nsset, string *nameserver, string *account, DNSBackend **db);
+  bool superMasterBackend(const string &ip, const DNSName &domain, const vector<DNSResourceRecord>&nsset, string *nameserver, string *account, DNSBackend **db) override;
   static pthread_mutex_t s_supermaster_config_lock;
-  bool createSlaveDomain(const string &ip, const DNSName &domain, const string &nameserver, const string &account);
+  bool createSlaveDomain(const string &ip, const DNSName &domain, const string &nameserver, const string &account) override;
 
 private:
   void setupDNSSEC();
@@ -261,9 +266,10 @@ private:
     handle();
 
     shared_ptr<const recordstorage_t > d_records;
-    recordstorage_t::const_iterator d_iter, d_end_iter;
-    recordstorage_t::const_iterator d_qname_iter;
-    recordstorage_t::const_iterator d_qname_end;
+    recordstorage_t::index<UnorderedNameTag>::type::const_iterator d_iter, d_end_iter;
+
+    recordstorage_t::const_iterator d_qname_iter, d_qname_end;
+
     DNSName qname;
     DNSName domain;
 
@@ -280,24 +286,25 @@ private:
     handle(const handle &);
   };
 
-  SSqlStatement* d_getAllDomainMetadataQuery_stmt;
-  SSqlStatement* d_getDomainMetadataQuery_stmt;
-  SSqlStatement* d_deleteDomainMetadataQuery_stmt;
-  SSqlStatement* d_insertDomainMetadataQuery_stmt;
-  SSqlStatement* d_getDomainKeysQuery_stmt;
-  SSqlStatement* d_deleteDomainKeyQuery_stmt;
-  SSqlStatement* d_insertDomainKeyQuery_stmt;
-  SSqlStatement* d_activateDomainKeyQuery_stmt;
-  SSqlStatement* d_deactivateDomainKeyQuery_stmt;
-  SSqlStatement* d_getTSIGKeyQuery_stmt;
-  SSqlStatement* d_setTSIGKeyQuery_stmt;
-  SSqlStatement* d_deleteTSIGKeyQuery_stmt;
-  SSqlStatement* d_getTSIGKeysQuery_stmt;
+  unique_ptr<SSqlStatement> d_getAllDomainMetadataQuery_stmt;
+  unique_ptr<SSqlStatement> d_getDomainMetadataQuery_stmt;
+  unique_ptr<SSqlStatement> d_deleteDomainMetadataQuery_stmt;
+  unique_ptr<SSqlStatement> d_insertDomainMetadataQuery_stmt;
+  unique_ptr<SSqlStatement> d_getDomainKeysQuery_stmt;
+  unique_ptr<SSqlStatement> d_deleteDomainKeyQuery_stmt;
+  unique_ptr<SSqlStatement> d_insertDomainKeyQuery_stmt;
+  unique_ptr<SSqlStatement> d_GetLastInsertedKeyIdQuery_stmt;
+  unique_ptr<SSqlStatement> d_activateDomainKeyQuery_stmt;
+  unique_ptr<SSqlStatement> d_deactivateDomainKeyQuery_stmt;
+  unique_ptr<SSqlStatement> d_getTSIGKeyQuery_stmt;
+  unique_ptr<SSqlStatement> d_setTSIGKeyQuery_stmt;
+  unique_ptr<SSqlStatement> d_deleteTSIGKeyQuery_stmt;
+  unique_ptr<SSqlStatement> d_getTSIGKeysQuery_stmt;
 
   string d_transaction_tmpname;
   string d_logprefix;
   set<string> alsoNotify; //!< this is used to store the also-notify list of interested peers.
-  ofstream *d_of;
+  std::unique_ptr<ofstream> d_of;
   handle d_handle;
   static string s_binddirectory;                              //!< this is used to store the 'directory' setting of the bind configuration
   static int s_first;                                  //!< this is raised on construction to prevent multiple instances of us being generated
@@ -308,13 +315,13 @@ private:
   BB2DomainInfo createDomainEntry(const DNSName& domain, const string &filename); //!< does not insert in s_state
 
   void queueReloadAndStore(unsigned int id);
-  bool findBeforeAndAfterUnhashed(BB2DomainInfo& bbd, const DNSName& qname, DNSName& unhashed, string& before, string& after);
-  void reload();
+  bool findBeforeAndAfterUnhashed(BB2DomainInfo& bbd, const DNSName& qname, DNSName& unhashed, DNSName& before, DNSName& after);
+  void reload() override;
   static string DLDomStatusHandler(const vector<string>&parts, Utility::pid_t ppid);
   static string DLListRejectsHandler(const vector<string>&parts, Utility::pid_t ppid);
   static string DLReloadNowHandler(const vector<string>&parts, Utility::pid_t ppid);
   static string DLAddDomainHandler(const vector<string>&parts, Utility::pid_t ppid);
-  static void fixupAuth(shared_ptr<recordstorage_t> records);
+  static void fixupOrderAndAuth(BB2DomainInfo& bbd, bool nsec3zone, NSEC3PARAMRecordContent ns3pr);
   void doEmptyNonTerminals(BB2DomainInfo& bbd, bool nsec3zone, NSEC3PARAMRecordContent ns3pr);
   void loadConfig(string *status=0);
   static void nukeZoneRecords(BB2DomainInfo *bbd);

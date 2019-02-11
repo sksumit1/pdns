@@ -1,24 +1,24 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2002 - 2008  PowerDNS.COM BV
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2 as 
-    published by the Free Software Foundation
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -59,7 +59,7 @@ int main(int argc, char **argv)
   string s_programname="pdns";
 
   ::arg().set("config-dir","Location of configuration directory (pdns.conf)")=SYSCONFDIR;
-  ::arg().set("socket-dir","Where the controlsocket will live")=LOCALSTATEDIR;
+  ::arg().set("socket-dir",string("Where the controlsocket will live, ")+LOCALSTATEDIR+" when unset and not chrooted" )="";
   ::arg().set("remote-address","Remote address to query");
   ::arg().set("remote-port","Remote port to query")="53000";
   ::arg().set("secret","Secret needed to connect to remote PowerDNS");
@@ -94,8 +94,18 @@ int main(int argc, char **argv)
     ::arg().laxFile(configname.c_str());
     ::arg().laxParse(argc,argv); // reparse so the commandline still wins
   }
-  
-  string socketname=::arg()["socket-dir"]+"/"+s_programname+".controlsocket";
+
+  string socketname=::arg()["socket-dir"];
+  if (::arg()["socket-dir"].empty()) {
+    if (::arg()["chroot"].empty())
+      socketname = LOCALSTATEDIR;
+    else
+      socketname = ::arg()["chroot"] + "/";
+  } else if (!::arg()["socket-dir"].empty() && !::arg()["chroot"].empty()) {
+    socketname = ::arg()["chroot"] + ::arg()["socket-dir"];
+  }
+
+  socketname += "/" + s_programname + ".controlsocket";
   cleanSlashes(socketname);
   
   try {
@@ -106,7 +116,7 @@ int main(int argc, char **argv)
     else {
       uint16_t port;
       try {
-        port  = lexical_cast<uint16_t>(::arg()["remote-port"]);
+        port = static_cast<uint16_t>(pdns_stou(::arg()["remote-port"]));
       }
       catch(...) {
         cerr<<"Unable to convert '"<<::arg()["remote-port"]<<"' to a port number for connecting to remote PowerDNS\n";
@@ -165,6 +175,10 @@ int main(int argc, char **argv)
   catch(PDNSException &ae) {
     cerr<<"Fatal error: "<<ae.reason<<endl;
     return 1;
+  }
+  catch(const std::runtime_error& e) {
+    cerr<<"Runtime error: "<<e.what()<<endl;
+    return 2;
   }
   return 0;
 }

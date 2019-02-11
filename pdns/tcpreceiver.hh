@@ -1,24 +1,24 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2002  PowerDNS.COM BV
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2
-    as published by the Free Software Foundation
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifndef PDNS_TCPRECEIVER_HH
 #define PDNS_TCPRECEIVER_HH
 
@@ -27,7 +27,7 @@
 #include "dnsbackend.hh"
 #include "packethandler.hh"
 #include <vector>
-
+#include <mutex>
 #include <poll.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -51,22 +51,28 @@ private:
 
   static void sendPacket(std::shared_ptr<DNSPacket> p, int outsock);
   static int readLength(int fd, ComboAddress *remote);
-  static void getQuestion(int fd, char *mesg, int pktlen, const ComboAddress& remote);
+  static void getQuestion(int fd, char *mesg, int pktlen, const ComboAddress& remote, unsigned int totalTime);
   static int doAXFR(const DNSName &target, std::shared_ptr<DNSPacket> q, int outsock);
   static int doIXFR(std::shared_ptr<DNSPacket> q, int outsock);
   static bool canDoAXFR(std::shared_ptr<DNSPacket> q);
   static void *doConnection(void *data);
   static void *launcher(void *data);
+  static void decrementClientCount(const ComboAddress& remote);
   void thread(void);
   static pthread_mutex_t s_plock;
+  static std::mutex s_clientsCountMutex;
+  static std::map<ComboAddress,size_t,ComboAddress::addressOnlyLessThan> s_clientsCount;
   static PacketHandler *s_P;
   pthread_t d_tid;
   static Semaphore *d_connectionroom_sem;
   static NetmaskGroup d_ng;
+  static size_t d_maxTransactionsPerConn;
+  static size_t d_maxConnectionsPerClient;
+  static unsigned int d_idleTimeout;
+  static unsigned int d_maxConnectionDuration;
 
   vector<int>d_sockets;
   vector<struct pollfd> d_prfds;
-  static int s_timeout;
 };
 
 #endif /* PDNS_TCPRECEIVER_HH */

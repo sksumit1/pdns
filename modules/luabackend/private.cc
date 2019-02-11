@@ -1,20 +1,25 @@
 /*
-    Copyright (C) 2011 Fredrik Danerklint
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2 as published 
-    by the Free Software Foundation
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
-
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ * originally authored by Fredrik Danerklint
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -67,7 +72,7 @@ bool LUABackend::domaininfo_from_table(DomainInfo *di) {
 	while (lua_next(lua, -2)) {
     	    value = lua_tostring(lua, -1);
     	    lua_pop(lua,1);
-    	    di->masters.push_back(value);
+    	    di->masters.push_back(ComboAddress(value, 53));
 	}    
     }
   
@@ -106,11 +111,11 @@ void LUABackend::dnsrr_to_table(lua_State *lua, const DNSResourceRecord *rr) {
     lua_settable(lua, -3);
     
     lua_pushliteral(lua, "qclass");
-    lua_pushnumber(lua, rr->qclass);
+    lua_pushinteger(lua, rr->qclass);
     lua_settable(lua, -3);
 
     lua_pushliteral(lua, "ttl");
-    lua_pushnumber(lua, rr->ttl);
+    lua_pushinteger(lua, rr->ttl);
     lua_settable(lua, -3);
 
     lua_pushliteral(lua, "auth");

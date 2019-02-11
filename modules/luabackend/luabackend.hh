@@ -1,3 +1,25 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
+
 #ifndef LUABACKEND_HH
 #define LUABACKEND_HH
 
@@ -14,7 +36,6 @@
 #include <string>
 using std::string;
 
-//#undef L
 
 
 
@@ -32,60 +53,57 @@ public:
 
     LUABackend(const string &suffix="");
     ~LUABackend();
-    bool list(const DNSName &target, int domain_id, bool include_disabled=false);
-    void lookup(const QType &qtype, const DNSName &qname, DNSPacket *p, int domain_id);
-    bool get(DNSResourceRecord &rr);
+    bool list(const DNSName &target, int domain_id, bool include_disabled=false) override;
+    void lookup(const QType &qtype, const DNSName &qname, DNSPacket *p, int domain_id) override;
+    bool get(DNSResourceRecord &rr) override;
     //! fills the soadata struct with the SOA details. Returns false if there is no SOA.
-    bool getSOA(const string &name, SOAData &soadata, DNSPacket *p=0);
+    bool getSOA(const DNSName &name, SOAData &soadata) override;
 
 
 //  MASTER BACKEND
 
-    void getUpdatedMasters(vector<DomainInfo>* domains);
-    void setNotifed(int id, uint32_t serial);
+    void getUpdatedMasters(vector<DomainInfo>* domains) override;
+    void setNotified(uint32_t id, uint32_t serial) override;
 
 
 //  SLAVE BACKEND
 
-    bool getDomainInfo(const string &domain, DomainInfo &di);
-    bool isMaster(const string &name, const string &ip);
-    void getUnfreshSlaveInfos(vector<DomainInfo>* domains);
-    void setFresh(uint32_t id);
+    bool getDomainInfo(const DNSName& domain, DomainInfo &di, bool getSerial=true) override;
+    void getUnfreshSlaveInfos(vector<DomainInfo>* domains) override;
+    void setFresh(uint32_t id) override;
 
-    bool startTransaction(const string &qname, int id);
-    bool commitTransaction();
-    bool abortTransaction();
-    bool feedRecord(const DNSResourceRecord &rr, string *ordername=0);
+    bool startTransaction(const DNSName &qname, int id) override;
+    bool commitTransaction() override;
+    bool abortTransaction() override;
+    bool feedRecord(const DNSResourceRecord &rr, const DNSName &ordername) override;
 
 
 //  SUPERMASTER BACKEND
 
-    bool superMasterBackend(const string &ip, const string &domain, const vector<DNSResourceRecord>&nsset, string *nameserver, string *account, DNSBackend **db);
-    bool createSlaveDomain(const string &ip, const string &domain, const string &nameserver, const string &account);
+    bool superMasterBackend(const string &ip, const DNSName &domain, const vector<DNSResourceRecord>&nsset, string *nameserver, string *account, DNSBackend **db) override;
+    bool createSlaveDomain(const string &ip, const DNSName &domain, const string &nameserver, const string &account) override;
 
 
 //  DNSSEC BACKEND
 
     //! get a list of IP addresses that should also be notified for a domain
-    void alsoNotifies(const string &domain, set<string> *ips);
-    bool getDomainMetadata(const string& name, const std::string& kind, std::vector<std::string>& meta);
-    bool setDomainMetadata(const string& name, const std::string& kind, const std::vector<std::string>& meta);
+    void alsoNotifies(const DNSName &domain, set<string> *ips) override;
+    bool getDomainMetadata(const DNSName& name, const std::string& kind, std::vector<std::string>& meta) override;
+    bool setDomainMetadata(const DNSName& name, const std::string& kind, const std::vector<std::string>& meta) override;
 
-    bool getDomainKeys(const string& name, unsigned int kind, std::vector<KeyData>& keys);
-    bool removeDomainKey(const string& name, unsigned int id);
-    bool activateDomainKey(const string& name, unsigned int id);
-    bool deactivateDomainKey(const string& name, unsigned int id);
-    bool getTSIGKey(const string& name, string* algorithm, string* content);
-    int addDomainKey(const string& name, const KeyData& key);
-
-    bool getBeforeAndAfterNamesAbsolute(uint32_t id, const std::string& qname, std::string& unhashed, std::string& before, std::string& after);
-    bool updateDNSSECOrderAndAuthAbsolute(uint32_t domain_id, const std::string& qname, const std::string& ordername, bool auth);
-    bool updateDNSSECOrderAndAuth(uint32_t domain_id, const std::string& zonename, const std::string& qname, bool auth);
-
-
+    bool getDomainKeys(const DNSName& name, std::vector<KeyData>& keys) override ;
+    bool removeDomainKey(const DNSName& name, unsigned int id) override ;
+    bool activateDomainKey(const DNSName& name, unsigned int id) override ;
+    bool deactivateDomainKey(const DNSName& name, unsigned int id) override ;
+    bool getTSIGKey(const DNSName& name, DNSName* algorithm, string* content) override ;
+    bool addDomainKey(const DNSName& name, const KeyData& key, int64_t& id) override ;
+    bool updateDNSSECOrderAndAuthAbsolute(uint32_t domain_id, const DNSName& qname, const std::string& ordername, bool auth);
+    bool getBeforeAndAfterNamesAbsolute(uint32_t id, const DNSName& qname, DNSName& unhashed, DNSName& before, DNSName& after) override;
+    bool updateDNSSECOrderNameAndAuth(uint32_t domain_id, const DNSName& qname, const DNSName& ordername, bool auth, const uint16_t qtype=QType::ANY) override;
+    bool updateDNSSECOrderAndAuth(uint32_t domain_id, const DNSName& zonename, const DNSName& qname, bool auth);
 //  OTHER
-    void reload();
-    void rediscover(string* status=0);
+    void reload() override ;
+    void rediscover(string* status=0) override ;
 
 
     string backend_name;
@@ -99,7 +117,7 @@ public:
 private:
 
     pthread_t backend_pid;
-    unsigned int backend_count;
+    unsigned int backend_count{0};
 
     int f_lua_exec_error;
 
@@ -111,7 +129,7 @@ private:
 
     //master functions....
     int f_lua_getupdatedmasters;
-    int f_lua_setnotifed;
+    int f_lua_setnotified;
 
     //slave functions....
     int f_lua_getdomaininfo;
@@ -155,9 +173,12 @@ private:
     bool getValueFromTable(lua_State *lua, const std::string& key, string& value);
     bool getValueFromTable(lua_State *lua, const std::string& key, DNSName& value);
     bool getValueFromTable(lua_State *lua, uint32_t key, string& value);
+#if !(defined(__i386__) && defined(__FreeBSD__))
     bool getValueFromTable(lua_State *lua, const std::string& key, time_t& value);
+#endif
     bool getValueFromTable(lua_State *lua, const std::string& key, uint32_t& value);
     bool getValueFromTable(lua_State *lua, const std::string& key, uint16_t& value);
+    bool getValueFromTable(lua_State *lua, const std::string& key, uint8_t& value);
     bool getValueFromTable(lua_State *lua, const std::string& key, int& value);
     bool getValueFromTable(lua_State *lua, const std::string& key, bool& value);
 
@@ -174,7 +195,7 @@ private:
     bool logging;
 
     //dnssec.cc
-    bool updateDomainKey(const string& name, unsigned int &id, bool toowhat);
+    bool updateDomainKey(const DNSName& name, unsigned int &id, bool toowhat);
 
 
 /*

@@ -1,36 +1,29 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2002 - 2013  PowerDNS.COM BV
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2
-    as published by the Free Software Foundation
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
-
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 #include "logger.hh"
 #include "version.hh"
-#ifdef HAVE_MBEDTLS2
-#include <mbedtls/version.h>
-#else
-#include <polarssl/version.h>
-#include "mbedtlscompat.hh"
-#endif
 
 static ProductType productType;
 
@@ -74,33 +67,39 @@ string productTypeApiType() {
 
 void showProductVersion()
 {
-  theL()<<Logger::Warning<<productName()<<" "<< VERSION << " (C) 2001-2015 "
+  g_log<<Logger::Warning<<productName()<<" "<< VERSION << " (C) 2001-2019 "
     "PowerDNS.COM BV" << endl;
-  theL()<<Logger::Warning<<"Using "<<(sizeof(unsigned long)*8)<<"-bits mode. "
+  g_log<<Logger::Warning<<"Using "<<(sizeof(unsigned long)*8)<<"-bits mode. "
     "Built using " << compilerVersion()
 #ifndef REPRODUCIBLE
     <<" on " __DATE__ " " __TIME__ " by " BUILD_HOST
 #endif
     <<"."<< endl;
-  theL()<<Logger::Warning<<"PowerDNS comes with ABSOLUTELY NO WARRANTY. "
+  g_log<<Logger::Warning<<"PowerDNS comes with ABSOLUTELY NO WARRANTY. "
     "This is free software, and you are welcome to redistribute it "
     "according to the terms of the GPL version 2." << endl;
 }
 
 void showBuildConfiguration()
 {
-  theL()<<Logger::Warning<<"Features: "<<
-#ifdef HAVE_BOTAN110
-    "botan1.10 " <<
+  g_log<<Logger::Warning<<"Features: "<<
+#ifdef HAVE_LIBDECAF
+    "decaf " <<
 #endif
-#ifdef HAVE_BOTAN18
-    "botan1.8" <<
+#ifdef HAVE_BOOST_CONTEXT
+    "fcontext " <<
 #endif
-#ifdef HAVE_CRYPTOPP
-    "cryptopp " <<
+#ifdef HAVE_LIBCRYPTO_ECDSA
+    "libcrypto-ecdsa " <<
 #endif
-#ifdef HAVE_LIBSODIUM
-    "sodium " <<
+#ifdef HAVE_LIBCRYPTO_ED25519
+    "libcrypto-ed25519 " <<
+#endif
+#ifdef HAVE_LIBCRYPTO_ED448
+    "libcrypto-ed448 " <<
+#endif
+#ifdef HAVE_LIBCRYPTO_EDDSA
+    "libcrypto-eddsa " <<
 #endif
 #ifdef HAVE_LIBDL
     "libdl " <<
@@ -108,8 +107,26 @@ void showBuildConfiguration()
 #ifdef HAVE_LUA
     "lua " <<
 #endif
+#ifdef HAVE_LUA_RECORDS
+    "lua-records " <<
+#endif
+#ifdef NOD_ENABLED
+    "nod " <<
+#endif
+#ifdef HAVE_P11KIT1
+    "PKCS#11 " <<
+#endif
+#ifdef HAVE_PROTOBUF
+    "protobuf " <<
+#endif
 #ifdef REMOTEBACKEND_ZEROMQ
-    "remotebackend-zeromq" <<
+    "remotebackend-zeromq " <<
+#endif
+#ifdef HAVE_NET_SNMP
+    "snmp " <<
+#endif
+#ifdef HAVE_LIBSODIUM
+    "sodium " <<
 #endif
 #ifdef VERBOSELOG
     "verboselog" <<
@@ -117,15 +134,12 @@ void showBuildConfiguration()
     endl;
 #ifdef PDNS_MODULES
   // Auth only
-  theL()<<Logger::Warning<<"Built-in modules: "<<PDNS_MODULES<<endl;
-#endif
-#ifndef MBEDTLS_SYSTEM
-  theL()<<Logger::Warning<<"Built-in mbed TLS: "<<MBEDTLS_VERSION_STRING<<endl;
+  g_log<<Logger::Warning<<"Built-in modules: "<<PDNS_MODULES<<endl;
 #endif
 #ifdef PDNS_CONFIG_ARGS
 #define double_escape(s) #s
 #define escape_quotes(s) double_escape(s)
-  theL()<<Logger::Warning<<"Configured with: "<<escape_quotes(PDNS_CONFIG_ARGS)<<endl;
+  g_log<<Logger::Warning<<"Configured with: "<<escape_quotes(PDNS_CONFIG_ARGS)<<endl;
 #undef escape_quotes
 #undef double_escape
 #endif

@@ -1,11 +1,24 @@
-/* Copyright 2001 Netherlabs BV, bert.hubert@netherlabs.nl. See LICENSE 
-   for more information.
-
-   Additionally, the license of this program contains a special
-   exception which allows to distribute the program in binary form when
-   it is linked against OpenSSL.
-
-   $Id$  */
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifndef SSQL_HH
 #define SSQL_HH
 
@@ -19,9 +32,8 @@
 class SSqlException 
 {
 public: 
-  SSqlException(const string &reason) 
+  SSqlException(const string &reason) : d_reason(reason)
   {
-      d_reason=reason;
   }
   
   string txtReason()
@@ -47,7 +59,7 @@ public:
   virtual SSqlStatement* bind(const string& name, unsigned long long value)=0;
   virtual SSqlStatement* bind(const string& name, const std::string& value)=0;
   SSqlStatement* bind(const string& name, const DNSName& value) {
-    return bind(name, toLower(value.toStringNoDot())); // FIXME400 toLower()?
+    return bind(name, value.makeLowerCase().toStringRootDot());
   }
   virtual SSqlStatement* bindNull(const string& name)=0;
   virtual SSqlStatement* execute()=0;;
@@ -63,12 +75,17 @@ class SSql
 {
 public:
   virtual SSqlException sPerrorException(const string &reason)=0;
-  virtual SSqlStatement* prepare(const string& query, int nparams)=0;
+  virtual std::unique_ptr<SSqlStatement> prepare(const string& query, int nparams)=0;
   virtual void execute(const string& query)=0;
   virtual void startTransaction()=0;
   virtual void rollback()=0;
   virtual void commit()=0;
   virtual void setLog(bool state){}
+  virtual bool isConnectionUsable()
+  {
+    return true;
+  }
+  virtual void reconnect() {};
   virtual ~SSql(){};
 };
 

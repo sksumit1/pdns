@@ -1,54 +1,53 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2002-2012  PowerDNS.COM BV
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2
-    as published by the Free Software Foundation
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 #include "utility.hh"
 #include "webserver.hh"
 #include "misc.hh"
+#include <thread>
+#include "threadname.hh"
 #include <vector>
 #include "logger.hh"
 #include <stdio.h>
 #include "dns.hh"
 #include "base64.hh"
 #include "json.hh"
-#include "arguments.hh"
 #include <yahttp/router.hpp>
 
-struct connectionThreadData {
-  WebServer* webServer;
-  Socket* client;
-};
-
-void HttpRequest::json(rapidjson::Document& document)
+json11::Json HttpRequest::json()
 {
+  string err;
   if(this->body.empty()) {
-    L<<Logger::Debug<<"HTTP: JSON document expected in request body, but body was empty" << endl;
+    g_log<<Logger::Debug<<"HTTP: JSON document expected in request body, but body was empty" << endl;
     throw HttpBadRequestException();
   }
-  if(document.Parse<0>(this->body.c_str()).HasParseError()) {
-    L<<Logger::Debug<<"HTTP: parsing of JSON document failed" << endl;
+  json11::Json doc = json11::Json::parse(this->body, err);
+  if (doc.is_null()) {
+    g_log<<Logger::Debug<<"HTTP: parsing of JSON document failed:" << err << endl;
     throw HttpBadRequestException();
   }
+  return doc;
 }
 
 bool HttpRequest::compareAuthorization(const string &expected_password)
@@ -82,9 +81,21 @@ bool HttpRequest::compareHeader(const string &header_name, const string &expecte
 }
 
 
-void HttpResponse::setBody(rapidjson::Document& document)
+void HttpResponse::setBody(const json11::Json& document)
 {
-  this->body = makeStringFromDocument(document);
+  document.dump(this->body);
+}
+
+void HttpResponse::setErrorResult(const std::string& message, const int status_)
+{
+  setBody(json11::Json::object { { "error", message } });
+  this->status = status_;
+}
+
+void HttpResponse::setSuccessResult(const std::string& message, const int status_)
+{
+  setBody(json11::Json::object { { "result", message } });
+  this->status = status_;
 }
 
 static void bareHandlerWrapper(WebServer::HandlerFunction handler, YaHTTP::Request* req, YaHTTP::Response* resp)
@@ -113,32 +124,30 @@ static bool optionsHandler(HttpRequest* req, HttpResponse* resp) {
   return false;
 }
 
-static void apiWrapper(WebServer::HandlerFunction handler, HttpRequest* req, HttpResponse* resp) {
-  const string& api_key = arg()["experimental-api-key"];
-
+static void apiWrapper(WebServer::HandlerFunction handler, HttpRequest* req, HttpResponse* resp, const string &apikey) {
   if (optionsHandler(req, resp)) return;
 
   resp->headers["access-control-allow-origin"] = "*";
 
-  if (api_key.empty()) {
-    L<<Logger::Error<<"HTTP API Request \"" << req->url.path << "\": Authentication failed, API Key missing in config" << endl;
+  if (apikey.empty()) {
+    g_log<<Logger::Error<<"HTTP API Request \"" << req->url.path << "\": Authentication failed, API Key missing in config" << endl;
     throw HttpUnauthorizedException("X-API-Key");
   }
-  bool auth_ok = req->compareHeader("x-api-key", api_key) || req->getvars["api-key"]==api_key;
+  bool auth_ok = req->compareHeader("x-api-key", apikey) || req->getvars["api-key"] == apikey;
   
   if (!auth_ok) {
-    L<<Logger::Error<<"HTTP Request \"" << req->url.path << "\": Authentication by API Key failed" << endl;
+    g_log<<Logger::Error<<"HTTP Request \"" << req->url.path << "\": Authentication by API Key failed" << endl;
     throw HttpUnauthorizedException("X-API-Key");
   }
 
   resp->headers["Content-Type"] = "application/json";
 
-  string callback;
-
-  if(req->getvars.count("callback")) {
-    callback=req->getvars["callback"];
-    req->getvars.erase("callback");
-  }
+  // security headers
+  resp->headers["X-Content-Type-Options"] = "nosniff";
+  resp->headers["X-Frame-Options"] = "deny";
+  resp->headers["X-Permitted-Cross-Domain-Policies"] = "none";
+  resp->headers["X-XSS-Protection"] = "1; mode=block";
+  resp->headers["Content-Security-Policy"] = "default-src 'self'; style-src 'self' 'unsafe-inline'";
 
   req->getvars.erase("_"); // jQuery cache buster
 
@@ -146,12 +155,10 @@ static void apiWrapper(WebServer::HandlerFunction handler, HttpRequest* req, Htt
     resp->status = 200;
     handler(req, resp);
   } catch (ApiException &e) {
-    resp->body = returnJsonError(e.what());
-    resp->status = 422;
+    resp->setErrorResult(e.what(), 422);
     return;
   } catch (JsonException &e) {
-    resp->body = returnJsonError(e.what());
-    resp->status = 422;
+    resp->setErrorResult(e.what(), 422);
     return;
   }
 
@@ -159,24 +166,19 @@ static void apiWrapper(WebServer::HandlerFunction handler, HttpRequest* req, Htt
     // No Content -> no Content-Type.
     resp->headers.erase("Content-Type");
   }
-
-  if(!callback.empty()) {
-    resp->body = callback + "(" + resp->body + ");";
-  }
 }
 
 void WebServer::registerApiHandler(const string& url, HandlerFunction handler) {
-  HandlerFunction f = boost::bind(&apiWrapper, handler, _1, _2);
+  HandlerFunction f = boost::bind(&apiWrapper, handler, _1, _2, d_apikey);
   registerBareHandler(url, f);
+  d_registerApiHandlerCalled = true;
 }
 
-static void webWrapper(WebServer::HandlerFunction handler, HttpRequest* req, HttpResponse* resp) {
-  const string& web_password = arg()["webserver-password"];
-
-  if (!web_password.empty()) {
-    bool auth_ok = req->compareAuthorization(web_password);
+static void webWrapper(WebServer::HandlerFunction handler, HttpRequest* req, HttpResponse* resp, const string &password) {
+  if (!password.empty()) {
+    bool auth_ok = req->compareAuthorization(password);
     if (!auth_ok) {
-      L<<Logger::Debug<<"HTTP Request \"" << req->url.path << "\": Web Authentication failed" << endl;
+      g_log<<Logger::Debug<<"HTTP Request \"" << req->url.path << "\": Web Authentication failed" << endl;
       throw HttpUnauthorizedException("Basic");
     }
   }
@@ -185,35 +187,28 @@ static void webWrapper(WebServer::HandlerFunction handler, HttpRequest* req, Htt
 }
 
 void WebServer::registerWebHandler(const string& url, HandlerFunction handler) {
-  HandlerFunction f = boost::bind(&webWrapper, handler, _1, _2);
+  HandlerFunction f = boost::bind(&webWrapper, handler, _1, _2, d_webserverPassword);
   registerBareHandler(url, f);
 }
 
-static void *WebServerConnectionThreadStart(void *p) {
-  connectionThreadData* data = static_cast<connectionThreadData*>(p);
-  pthread_detach(pthread_self());
-  data->webServer->serveConnection(data->client);
-
-  delete data->client; // close socket
-  delete data;
-
-  return NULL;
+static void *WebServerConnectionThreadStart(const WebServer* webServer, std::shared_ptr<Socket> client) {
+  setThreadName("pdns-r/webhndlr");
+  webServer->serveConnection(client);
+  return nullptr;
 }
 
-HttpResponse WebServer::handleRequest(HttpRequest req)
+void WebServer::handleRequest(HttpRequest& req, HttpResponse& resp) const
 {
-  HttpResponse resp;
-
   // set default headers
   resp.headers["Content-Type"] = "text/html; charset=utf-8";
 
   try {
     if (!req.complete) {
-      L<<Logger::Debug<<"HTTP: Incomplete request" << endl;
+      g_log<<Logger::Debug<<"HTTP: Incomplete request" << endl;
       throw HttpBadRequestException();
     }
 
-    L<<Logger::Debug<<"HTTP: Handling request \"" << req.url.path << "\"" << endl;
+    g_log<<Logger::Debug<<"HTTP: Handling request \"" << req.url.path << "\"" << endl;
 
     YaHTTP::strstr_map_t::iterator header;
 
@@ -228,40 +223,42 @@ HttpResponse WebServer::handleRequest(HttpRequest req)
 
     YaHTTP::THandlerFunction handler;
     if (!YaHTTP::Router::Route(&req, handler)) {
-      L<<Logger::Debug<<"HTTP: No route found for \"" << req.url.path << "\"" << endl;
+      g_log<<Logger::Debug<<"HTTP: No route found for \"" << req.url.path << "\"" << endl;
       throw HttpNotFoundException();
     }
 
     try {
       handler(&req, &resp);
-      L<<Logger::Debug<<"HTTP: Result for \"" << req.url.path << "\": " << resp.status << ", body length: " << resp.body.size() << endl;
+      g_log<<Logger::Debug<<"HTTP: Result for \"" << req.url.path << "\": " << resp.status << ", body length: " << resp.body.size() << endl;
     }
-    catch(HttpException) {
+    catch(HttpException&) {
       throw;
     }
     catch(PDNSException &e) {
-      L<<Logger::Error<<"HTTP ISE for \""<< req.url.path << "\": Exception: " << e.reason << endl;
+      g_log<<Logger::Error<<"HTTP ISE for \""<< req.url.path << "\": Exception: " << e.reason << endl;
       throw HttpInternalServerErrorException();
     }
     catch(std::exception &e) {
-      L<<Logger::Error<<"HTTP ISE for \""<< req.url.path << "\": STL Exception: " << e.what() << endl;
+      g_log<<Logger::Error<<"HTTP ISE for \""<< req.url.path << "\": STL Exception: " << e.what() << endl;
       throw HttpInternalServerErrorException();
     }
     catch(...) {
-      L<<Logger::Error<<"HTTP ISE for \""<< req.url.path << "\": Unknown Exception" << endl;
+      g_log<<Logger::Error<<"HTTP ISE for \""<< req.url.path << "\": Unknown Exception" << endl;
       throw HttpInternalServerErrorException();
     }
   }
   catch(HttpException &e) {
     resp = e.response();
-    L<<Logger::Debug<<"HTTP: Error result for \"" << req.url.path << "\": " << resp.status << endl;
+    g_log<<Logger::Debug<<"HTTP: Error result for \"" << req.url.path << "\": " << resp.status << endl;
     string what = YaHTTP::Utility::status2text(resp.status);
     if(req.accept_html) {
       resp.headers["Content-Type"] = "text/html; charset=utf-8";
       resp.body = "<!html><title>" + what + "</title><h1>" + what + "</h1>";
     } else if (req.accept_json) {
       resp.headers["Content-Type"] = "application/json";
-      resp.body = returnJsonError(what);
+      if (resp.body.empty()) {
+        resp.setErrorResult(what, resp.status);
+      }
     } else {
       resp.headers["Content-Type"] = "text/plain; charset=utf-8";
       resp.body = what;
@@ -275,13 +272,11 @@ HttpResponse WebServer::handleRequest(HttpRequest req)
   if (req.method == "HEAD") {
     resp.body = "";
   } else {
-    resp.headers["Content-Length"] = lexical_cast<string>(resp.body.size());
+    resp.headers["Content-Length"] = std::to_string(resp.body.size());
   }
-
-  return resp;
 }
 
-void WebServer::serveConnection(Socket *client)
+void WebServer::serveConnection(std::shared_ptr<Socket> client) const
 try {
   HttpRequest req;
   YaHTTP::AsyncRequestLoader yarl;
@@ -307,7 +302,8 @@ try {
     // request stays incomplete
   }
 
-  HttpResponse resp = WebServer::handleRequest(req);
+  HttpResponse resp;
+  WebServer::handleRequest(req, resp);
   ostringstream ss;
   resp.write(ss);
   string reply = ss.str();
@@ -315,31 +311,32 @@ try {
   client->writenWithTimeout(reply.c_str(), reply.size(), timeout);
 }
 catch(PDNSException &e) {
-  L<<Logger::Error<<"HTTP Exception: "<<e.reason<<endl;
+  g_log<<Logger::Error<<"HTTP Exception: "<<e.reason<<endl;
 }
 catch(std::exception &e) {
   if(strstr(e.what(), "timeout")==0)
-    L<<Logger::Error<<"HTTP STL Exception: "<<e.what()<<endl;
+    g_log<<Logger::Error<<"HTTP STL Exception: "<<e.what()<<endl;
 }
 catch(...) {
-  L<<Logger::Error<<"HTTP: Unknown exception"<<endl;
+  g_log<<Logger::Error<<"HTTP: Unknown exception"<<endl;
 }
 
-WebServer::WebServer(const string &listenaddress, int port) : d_server(NULL)
+WebServer::WebServer(const string &listenaddress, int port) :
+  d_listenaddress(listenaddress),
+  d_port(port),
+  d_server(nullptr)
 {
-  d_listenaddress=listenaddress;
-  d_port=port;
 }
 
 void WebServer::bind()
 {
   try {
     d_server = createServer();
-    L<<Logger::Warning<<"Listening for HTTP requests on "<<d_server->d_local.toStringWithPort()<<endl;
+    g_log<<Logger::Warning<<"Listening for HTTP requests on "<<d_server->d_local.toStringWithPort()<<endl;
   }
   catch(NetworkError &e) {
-    L<<Logger::Error<<"Listening on HTTP socket failed: "<<e.what()<<endl;
-    d_server = NULL;
+    g_log<<Logger::Error<<"Listening on HTTP socket failed: "<<e.what()<<endl;
+    d_server = nullptr;
   }
 }
 
@@ -348,35 +345,40 @@ void WebServer::go()
   if(!d_server)
     return;
   try {
-    pthread_t tid;
-
-    NetmaskGroup acl;
-    acl.toMasks(::arg()["webserver-allow-from"]);
-
     while(true) {
-      // data and data->client will be freed by thread
-      connectionThreadData *data = new connectionThreadData;
-      data->webServer = this;
-      data->client = d_server->accept();
-      if (data->client->acl(acl)) {
-        pthread_create(&tid, 0, &WebServerConnectionThreadStart, (void *)data);
-      } else {
-        ComboAddress remote;
-        if (data->client->getRemote(remote))
-          L<<Logger::Error<<"Webserver closing socket: remote ("<< remote.toString() <<") does not match 'webserver-allow-from'"<<endl;
-        delete data->client; // close socket
-        delete data;
+      try {
+        auto client = d_server->accept();
+        if (!client) {
+          continue;
+        }
+        if (client->acl(d_acl)) {
+          std::thread webHandler(WebServerConnectionThreadStart, this, client);
+          webHandler.detach();
+        } else {
+          ComboAddress remote;
+          if (client->getRemote(remote))
+            g_log<<Logger::Error<<"Webserver closing socket: remote ("<< remote.toString() <<") does not match the set ACL("<<d_acl.toString()<<")"<<endl;
+        }
+      }
+      catch(PDNSException &e) {
+        g_log<<Logger::Error<<"PDNSException while accepting a connection in main webserver thread: "<<e.reason<<endl;
+      }
+      catch(std::exception &e) {
+        g_log<<Logger::Error<<"STL Exception while accepting a connection in main webserver thread: "<<e.what()<<endl;
+      }
+      catch(...) {
+        g_log<<Logger::Error<<"Unknown exception while accepting a connection in main webserver thread"<<endl;
       }
     }
   }
   catch(PDNSException &e) {
-    L<<Logger::Error<<"PDNSException in main webserver thread: "<<e.reason<<endl;
+    g_log<<Logger::Error<<"PDNSException in main webserver thread: "<<e.reason<<endl;
   }
   catch(std::exception &e) {
-    L<<Logger::Error<<"STL Exception in main webserver thread: "<<e.what()<<endl;
+    g_log<<Logger::Error<<"STL Exception in main webserver thread: "<<e.what()<<endl;
   }
   catch(...) {
-    L<<Logger::Error<<"Unknown exception in main webserver thread"<<endl;
+    g_log<<Logger::Error<<"Unknown exception in main webserver thread"<<endl;
   }
-  exit(1);
+  _exit(1);
 }

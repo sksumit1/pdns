@@ -1,28 +1,30 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2002 - 2008  PowerDNS.COM BV
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2 as 
-    published by the Free Software Foundation.
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include "packetcache.hh"
+#include "auth-caches.hh"
+#include "auth-querycache.hh"
+#include "auth-packetcache.hh"
 #include "utility.hh"
 #include "dynhandler.hh"
 #include "statbag.hh"
@@ -54,14 +56,14 @@ string DLQuitHandler(const vector<string>&parts, Utility::pid_t ppid)
   if(parts[0]=="QUIT") {
     s_pleasequit=true;
     ret="Scheduling exit";
-    L<<Logger::Error<<"Scheduling exit on remote request"<<endl;
+    g_log<<Logger::Error<<"Scheduling exit on remote request"<<endl;
   }
   return ret;
 }
 
 static void dokill(int)
 {
-  exit(1);
+  exit(0);
 }
 
 string DLCurrentConfigHandler(const vector<string>&parts, Utility::pid_t ppid)
@@ -121,19 +123,21 @@ string DLUptimeHandler(const vector<string>&parts, Utility::pid_t ppid)
 
 string DLPurgeHandler(const vector<string>&parts, Utility::pid_t ppid)
 {
-  extern PacketCache PC;  
   DNSSECKeeper dk;
   ostringstream os;
   int ret=0;
 
   if(parts.size()>1) {
     for (vector<string>::const_iterator i=++parts.begin();i<parts.end();++i) {
-      ret+=PC.purge(*i);
-      dk.clearCaches(DNSName(*i));
+      ret+=purgeAuthCaches(*i);
+      if(!boost::ends_with(*i, "$"))
+	dk.clearCaches(DNSName(*i));
+      else
+	dk.clearAllCaches(); // at least we do what we promise.. and a bit more!
     }
   }
   else {
-    ret=PC.purge();
+    ret = purgeAuthCaches();
     dk.clearAllCaches();
   }
 
@@ -143,11 +147,13 @@ string DLPurgeHandler(const vector<string>&parts, Utility::pid_t ppid)
 
 string DLCCHandler(const vector<string>&parts, Utility::pid_t ppid)
 {
-  extern PacketCache PC;  
-  map<char,int> counts=PC.getCounts();
+  extern AuthPacketCache PC;
+  extern AuthQueryCache QC;
+  map<char,uint64_t> counts=QC.getCounts();
+  uint64_t packetEntries = PC.size();
   ostringstream os;
   bool first=true;
-  for(map<char,int>::const_iterator i=counts.begin();i!=counts.end();++i) {
+  for(map<char,uint64_t>::const_iterator i=counts.begin();i!=counts.end();++i) {
     if(!first) 
       os<<", ";
     first=false;
@@ -156,15 +162,12 @@ string DLCCHandler(const vector<string>&parts, Utility::pid_t ppid)
       os<<"negative queries: ";
     else if(i->first=='Q')
       os<<"queries: ";
-    else if(i->first=='n')
-      os<<"non-recursive packets: ";
-    else if(i->first=='r')
-      os<<"recursive packets: ";
     else 
       os<<"unknown: ";
 
     os<<i->second;
   }
+  os<<"packets: "<<packetEntries;
 
   return os.str();
 }
@@ -180,7 +183,7 @@ string DLRSizesHandler(const vector<string>&parts, Utility::pid_t ppid)
   respsizes_t respsizes = g_rs.getSizeResponseCounts();
   ostringstream os;
   boost::format fmt("%d\t%d\n");
-  BOOST_FOREACH(const respsizes_t::value_type& val, respsizes) {
+  for(const respsizes_t::value_type& val :  respsizes) {
     os << (fmt % val.first % val.second).str();
   }
   return os.str();
@@ -193,7 +196,7 @@ string DLRemotesHandler(const vector<string>&parts, Utility::pid_t ppid)
   totals_t totals = S.getRing("remotes");
   string ret;
   boost::format fmt("%s\t%d\n");
-  BOOST_FOREACH(totals_t::value_type& val, totals) {
+  for(totals_t::value_type& val :  totals) {
     ret += (fmt % val.first % val.second).str();
   }
   return ret;
@@ -232,18 +235,24 @@ string DLNotifyRetrieveHandler(const vector<string>&parts, Utility::pid_t ppid)
   if(parts.size()!=2)
     return "syntax: retrieve domain";
 
-  const string& domain=parts[1];
+  DNSName domain;
+  try {
+    domain = DNSName(parts[1]);
+  } catch (...) {
+    return "Failed to parse domain as valid DNS name";
+  }
+
   DomainInfo di;
   UeberBackend B;
-  if(!B.getDomainInfo(DNSName(domain), di))
-    return "Domain '"+domain+"' unknown";
+  if(!B.getDomainInfo(domain, di))
+    return "Domain '"+domain.toString()+"' unknown";
   
-  if(di.masters.empty())
-    return "Domain '"+domain+"' is not a slave domain (or has no master defined)";
+  if(di.kind != DomainInfo::Slave || di.masters.empty())
+    return "Domain '"+domain.toString()+"' is not a slave domain (or has no master defined)";
 
   random_shuffle(di.masters.begin(), di.masters.end());
-  Communicator.addSuckRequest(DNSName(domain), di.masters.front());
-  return "Added retrieval request for '"+domain+"' from master "+di.masters.front();
+  Communicator.addSuckRequest(domain, di.masters.front()); 
+  return "Added retrieval request for '"+domain.toString()+"' from master "+di.masters.front().toLogString();
 }
 
 string DLNotifyHostHandler(const vector<string>&parts, Utility::pid_t ppid)
@@ -252,8 +261,15 @@ string DLNotifyHostHandler(const vector<string>&parts, Utility::pid_t ppid)
   ostringstream os;
   if(parts.size()!=3)
     return "syntax: notify-host domain ip";
-  if(!::arg().mustDo("master"))
-      return "PowerDNS not configured as master";
+  if(!::arg().mustDo("master") && !(::arg().mustDo("slave") && ::arg().mustDo("slave-renotify")))
+      return "PowerDNS not configured as master or slave with re-notifications";
+
+  DNSName domain;
+  try {
+    domain = DNSName(parts[1]);
+  } catch (...) {
+    return "Failed to parse domain as valid DNS name";
+  }
 
   try {
     ComboAddress ca(parts[2]);
@@ -262,13 +278,10 @@ string DLNotifyHostHandler(const vector<string>&parts, Utility::pid_t ppid)
     return "Unable to convert '"+parts[2]+"' to an IP address";
   }
   
-  L<<Logger::Warning<<"Notification request to host "<<parts[2]<<" for domain '"<<parts[1]<<"' received"<<endl;
-  Communicator.notify(DNSName(parts[1]), parts[2]);
+  g_log<<Logger::Warning<<"Notification request to host "<<parts[2]<<" for domain '"<<domain<<"' received from operator"<<endl;
+  Communicator.notify(domain, parts[2]);
   return "Added to queue";
 }
-
-// XXX DNSName pain - if you pass us something that is not DNS,  you'll get an exception here, which you never got before
-// and I bet we don't report it well to the user...
 
 string DLNotifyHandler(const vector<string>&parts, Utility::pid_t ppid)
 {
@@ -276,9 +289,9 @@ string DLNotifyHandler(const vector<string>&parts, Utility::pid_t ppid)
   UeberBackend B;
   if(parts.size()!=2)
     return "syntax: notify domain";
-  if(!::arg().mustDo("master"))
-      return "PowerDNS not configured as master";
-  L<<Logger::Warning<<"Notification request for domain '"<<parts[1]<<"' received from operator"<<endl;
+  if(!::arg().mustDo("master") && !(::arg().mustDo("slave") && ::arg().mustDo("slave-renotify")))
+      return "PowerDNS not configured as master or slave with re-notifications";
+  g_log<<Logger::Warning<<"Notification request for domain '"<<parts[1]<<"' received from operator"<<endl;
 
   if (parts[1] == "*") {
     vector<DomainInfo> domains;
@@ -286,18 +299,24 @@ string DLNotifyHandler(const vector<string>&parts, Utility::pid_t ppid)
 
     int total = 0;
     int notified = 0;
-    for (vector<DomainInfo>::const_iterator di=domains.begin(); di != domains.end(); di++) {
-      if (di->kind == 0) { // MASTER
+    for (const auto& di : domains) {
+      if (di.kind == DomainInfo::Master || di.kind == DomainInfo::Slave) { // MASTER and Slave if slave-renotify is enabled
         total++;
-        if(Communicator.notifyDomain(di->zone))
+        if(Communicator.notifyDomain(di.zone))
           notified++;
       }
     }
 
     if (total != notified)
       return itoa(notified)+" out of "+itoa(total)+" zones added to queue - see log";
-    return "Added "+itoa(total)+" MASTER zones to queue";
+    return "Added "+itoa(total)+" MASTER/SLAVE zones to queue";
   } else {
+    DNSName domain;
+    try {
+      domain = DNSName(parts[1]);
+    } catch (...) {
+      return "Failed to parse domain as valid DNS name";
+    }
     if(!Communicator.notifyDomain(DNSName(parts[1])))
       return "Failed to add to the queue - see log";
     return "Added to queue";
@@ -308,7 +327,7 @@ string DLRediscoverHandler(const vector<string>&parts, Utility::pid_t ppid)
 {
   UeberBackend B;
   try {
-    L<<Logger::Error<<"Rediscovery was requested"<<endl;
+    g_log<<Logger::Error<<"Rediscovery was requested"<<endl;
     string status="Ok";
     B.rediscover(&status);
     return status;
@@ -323,7 +342,7 @@ string DLReloadHandler(const vector<string>&parts, Utility::pid_t ppid)
 {
   UeberBackend B;
   B.reload();
-  L<<Logger::Error<<"Reload was requested"<<endl;
+  g_log<<Logger::Error<<"Reload was requested"<<endl;
   return "Ok";
 }
 
@@ -331,7 +350,7 @@ string DLReloadHandler(const vector<string>&parts, Utility::pid_t ppid)
 string DLListZones(const vector<string>&parts, Utility::pid_t ppid)
 {
   UeberBackend B;
-  L<<Logger::Notice<<"Received request to list zones."<<endl;
+  g_log<<Logger::Notice<<"Received request to list zones."<<endl;
   vector<DomainInfo> domains;
   B.getAllDomains(&domains);
   ostringstream ret;
@@ -347,9 +366,9 @@ string DLListZones(const vector<string>&parts, Utility::pid_t ppid)
 
   int count = 0;
 
-  for (vector<DomainInfo>::const_iterator di=domains.begin(); di != domains.end(); di++) {
-    if (di->kind == kindFilter || kindFilter == -1) {
-      ret<<di->zone.toString()<<endl;
+  for (const auto& di: domains) {
+    if (di.kind == kindFilter || kindFilter == -1) {
+      ret<<di.zone.toString()<<endl;
       count++;
     }
   }
@@ -361,18 +380,8 @@ string DLListZones(const vector<string>&parts, Utility::pid_t ppid)
   return ret.str();
 }
 
-string DLPolicy(const vector<string>&parts, Utility::pid_t ppid)
-{
-  if(LPE) {
-    return LPE->policycmd(parts);
-  }
-  else {
-    return "no policy script loaded";
-  }
-}
-
 #ifdef HAVE_P11KIT1
-extern bool PKCS11ModuleSlotLogin(const std::string& module, int slot, const std::string& pin);
+extern bool PKCS11ModuleSlotLogin(const std::string& module, const string& tokenId, const std::string& pin);
 #endif
 
 string DLTokenLogin(const vector<string>&parts, Utility::pid_t ppid)
@@ -381,10 +390,10 @@ string DLTokenLogin(const vector<string>&parts, Utility::pid_t ppid)
   return "PKCS#11 support not compiled in";
 #else
   if (parts.size() != 4) {
-    return "invalid number of parameters, needs 4, got " + boost::lexical_cast<string>(parts.size());
+    return "invalid number of parameters, needs 4, got " + std::to_string(parts.size());
   }
 
-  if (PKCS11ModuleSlotLogin(parts[1], boost::lexical_cast<int>(parts[2]), parts[3])) {
+  if (PKCS11ModuleSlotLogin(parts[1], parts[2], parts[3])) {
     return "logged in";
   } else {
     return "could not log in, check logs";

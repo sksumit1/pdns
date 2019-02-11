@@ -1,8 +1,23 @@
-
-//
-// SQLite backend for PowerDNS
-// Copyright (C) 2003, Michel Stol <michel@powerdns.com>
-//
+/*  SQLite backend for PowerDNS
+ *  Copyright (C) 2003, Michel Stol <michel@powerdns.com>
+ *
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License version 2
+ *  as published by the Free Software Foundation.
+ *
+ *  Additionally, the license of this program contains a special
+ *  exception which allows to distribute the program in binary form when
+ *  it is linked against OpenSSL.
+ *
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ */
 
 #ifdef HAVE_CONFIG_H
 #include "config.h"
@@ -20,7 +35,7 @@
 /*
 ** Set all the parameters in the compiled SQL statement to NULL.
 *
-* copied from sqlite 3.3.6 // cmouse 
+* copied from sqlite 3.3.6 // cmouse
 */
 int pdns_sqlite3_clear_bindings(sqlite3_stmt *pStmt){
   int i;
@@ -31,34 +46,21 @@ int pdns_sqlite3_clear_bindings(sqlite3_stmt *pStmt){
   return rc;
 }
 
-void my_trace(void *foo, const char *sql) {
-  L<<Logger::Warning<< "Query: " << sql << endl;
-}
-
-class SSQLite3Statement: public SSqlStatement 
+class SSQLite3Statement: public SSqlStatement
 {
 public:
-  SSQLite3Statement(SSQLite3 *db, bool dolog, const string& query) 
+  SSQLite3Statement(SSQLite3 *db, bool dolog, const string& query) :
+    d_query(query),
+    d_db(db),
+    d_dolog(dolog)
   {
-    const char *pTail;
-    this->d_query = query;
-    this->d_dolog = dolog;
-    d_rc = 0;
-    d_db = db;
-#if SQLITE_VERSION_NUMBER >= 3003009
-    if (sqlite3_prepare_v2(d_db->db(), query.c_str(), -1, &d_stmt, &pTail ) != SQLITE_OK)
-#else
-    if (sqlite3_prepare(d_db->db(), query.c_str(), -1, &d_stmt, &pTail ) != SQLITE_OK)
-#endif
-      throw SSqlException(string("Unable to compile SQLite statement : ")+sqlite3_errmsg(d_db->db()));
-    if (pTail && strlen(pTail)>0)
-      L<<Logger::Warning<<"Sqlite3 command partially processed. Unprocessed part: "<<pTail<<endl;
   }
 
   int name2idx(const string& name) {
     string zName = string(":")+name;
+    prepareStatement();
     return sqlite3_bind_parameter_index(d_stmt, zName.c_str());
-    // XXX: support @ and $?    
+    // XXX: support @ and $?
   }
 
   SSqlStatement* bind(const string& name, bool value) { int idx = name2idx(name); if (idx>0) { sqlite3_bind_int(d_stmt, idx, value ? 1 : 0); }; return this; }
@@ -72,18 +74,31 @@ public:
   SSqlStatement* bindNull(const string& name) { int idx = name2idx(name); if (idx>0) { sqlite3_bind_null(d_stmt, idx); }; return this; }
 
   SSqlStatement* execute() {
+    prepareStatement();
+    if (d_dolog) {
+      g_log<<Logger::Warning<< "Query "<<((long)(void*)this)<<": " << d_query << endl;
+      d_dtime.set();
+    }
     int attempts = d_db->inTransaction(); // try only once
     while(attempts < 2 && (d_rc = sqlite3_step(d_stmt)) == SQLITE_BUSY) attempts++;
 
     if (d_rc != SQLITE_ROW && d_rc != SQLITE_DONE) {
       // failed.
-      if (d_rc == SQLITE_CANTOPEN) 
+      releaseStatement();
+      if (d_rc == SQLITE_CANTOPEN)
         throw SSqlException(string("CANTOPEN error in sqlite3, often caused by unwritable sqlite3 db *directory*: ")+string(sqlite3_errmsg(d_db->db())));
       throw SSqlException(string("Error while retrieving SQLite query results: ")+string(sqlite3_errmsg(d_db->db())));
     }
+    if(d_dolog) 
+      g_log<<Logger::Warning<< "Query "<<((long)(void*)this)<<": "<<d_dtime.udiffNoReset()<<" usec to execute"<<endl;
     return this;
   }
-  bool hasNextRow() { return d_rc == SQLITE_ROW; }
+  bool hasNextRow() {
+    if(d_dolog && d_rc != SQLITE_ROW) {
+      g_log<<Logger::Warning<< "Query "<<((long)(void*)this)<<": "<<d_dtime.udiffNoReset()<<" total usec to last row"<<endl;
+    }
+    return d_rc == SQLITE_ROW;
+  }
 
   SSqlStatement* nextRow(row_t& row) {
     row.clear();
@@ -96,7 +111,7 @@ public:
         row.push_back("");
       } else {
         const char *pData = (const char*) sqlite3_column_text(d_stmt, i);
-        row.push_back(string(pData, sqlite3_column_bytes(d_stmt, i))); 
+        row.push_back(string(pData, sqlite3_column_bytes(d_stmt, i)));
       }
     }
     d_rc = sqlite3_step(d_stmt);
@@ -125,26 +140,55 @@ public:
 
   ~SSQLite3Statement() {
     // deallocate if necessary
-    if (d_stmt) 
-      sqlite3_finalize(d_stmt);
+    releaseStatement();
   }
 
   const string& getQuery() { return d_query; };
 private:
   string d_query;
-  sqlite3_stmt* d_stmt;
-  SSQLite3* d_db;
-  int d_rc;
+  DTime d_dtime;
+  sqlite3_stmt* d_stmt{nullptr};
+  SSQLite3* d_db{nullptr};
+  int d_rc{0};
   bool d_dolog;
+  bool d_prepared{false};
+
+  void prepareStatement() {
+    const char *pTail;
+
+    if (d_prepared) return;
+#if SQLITE_VERSION_NUMBER >= 3003009
+    if (sqlite3_prepare_v2(d_db->db(), d_query.c_str(), -1, &d_stmt, &pTail ) != SQLITE_OK)
+#else
+    if (sqlite3_prepare(d_db->db(), d_query.c_str(), -1, &d_stmt, &pTail ) != SQLITE_OK)
+#endif
+    {
+      releaseStatement();
+      throw SSqlException(string("Unable to compile SQLite statement : '")+d_query+"': "+sqlite3_errmsg(d_db->db()));
+    }
+    if (pTail && strlen(pTail)>0)
+      g_log<<Logger::Warning<<"Sqlite3 command partially processed. Unprocessed part: "<<pTail<<endl;
+    d_prepared = true;
+  }
+
+  void releaseStatement() {
+    if (d_stmt)
+      sqlite3_finalize(d_stmt);
+    d_stmt = nullptr;
+    d_prepared = false;
+  }
 };
 
 // Constructor.
 SSQLite3::SSQLite3( const std::string & database, bool creat )
 {
-  // Open the database connection.
-  if(!creat) 
-    if ( access( database.c_str(), F_OK ) == -1 )
+  if (access( database.c_str(), F_OK ) == -1){
+    if (!creat)
       throw sPerrorException( "SQLite database '"+database+"' does not exist yet" );
+  } else {
+    if (creat)
+      throw sPerrorException( "SQLite database '"+database+"' already exists" );
+  }
 
   if ( sqlite3_open( database.c_str(), &m_pDB)!=SQLITE_OK )
     throw sPerrorException( "Could not connect to the SQLite database '" + database + "'" );
@@ -154,9 +198,7 @@ SSQLite3::SSQLite3( const std::string & database, bool creat )
 }
 
 void SSQLite3::setLog(bool state)
-{ 
-  if (state)
-      sqlite3_trace(m_pDB, my_trace, NULL);
+{
   m_dolog=state;
 }
 
@@ -176,8 +218,8 @@ SSQLite3::~SSQLite3()
   }
 }
 
-SSqlStatement* SSQLite3::prepare(const string& query, int nparams __attribute__((unused))) {
-  return new SSQLite3Statement(this, m_dolog, query);
+std::unique_ptr<SSqlStatement> SSQLite3::prepare(const string& query, int nparams __attribute__((unused))) {
+  return std::unique_ptr<SSqlStatement>(new SSQLite3Statement(this, m_dolog, query));
 }
 
 void SSQLite3::execute(const string& query) {

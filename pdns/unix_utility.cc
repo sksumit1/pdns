@@ -1,25 +1,24 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2002 - 2011 PowerDNS.COM BV
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2 as 
-    published by the Free Software Foundation
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
-
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -80,26 +79,27 @@ int Utility::timed_connect( Utility::sock_t sock,
 
 void Utility::setBindAny(int af, sock_t sock)
 {
-  int one = 1;
+  const int one = 1;
 
+  (void) one; // avoids 'unused var' warning on systems that have none of the defines checked below
 #ifdef IP_FREEBIND
   if (setsockopt(sock, IPPROTO_IP, IP_FREEBIND, &one, sizeof(one)) < 0)
-      theL()<<Logger::Warning<<"Warning: IP_FREEBIND setsockopt failed: "<<strerror(errno)<<endl;
+      g_log<<Logger::Warning<<"Warning: IP_FREEBIND setsockopt failed: "<<strerror(errno)<<endl;
 #endif
 
 #ifdef IP_BINDANY
   if (af == AF_INET)
     if (setsockopt(sock, IPPROTO_IP, IP_BINDANY, &one, sizeof(one)) < 0)
-      theL()<<Logger::Warning<<"Warning: IP_BINDANY setsockopt failed: "<<strerror(errno)<<endl;
+      g_log<<Logger::Warning<<"Warning: IP_BINDANY setsockopt failed: "<<strerror(errno)<<endl;
 #endif
 #ifdef IPV6_BINDANY
   if (af == AF_INET6)
     if (setsockopt(sock, IPPROTO_IPV6, IPV6_BINDANY, &one, sizeof(one)) < 0)
-      theL()<<Logger::Warning<<"Warning: IPV6_BINDANY setsockopt failed: "<<strerror(errno)<<endl;
+      g_log<<Logger::Warning<<"Warning: IPV6_BINDANY setsockopt failed: "<<strerror(errno)<<endl;
 #endif
 #ifdef SO_BINDANY
   if (setsockopt(sock, SOL_SOCKET, SO_BINDANY, &one, sizeof(one)) < 0)
-      theL()<<Logger::Warning<<"Warning: SO_BINDANY setsockopt failed: "<<strerror(errno)<<endl;
+      g_log<<Logger::Warning<<"Warning: SO_BINDANY setsockopt failed: "<<strerror(errno)<<endl;
 #endif
 }
 
@@ -128,22 +128,22 @@ void Utility::dropGroupPrivs( int uid, int gid )
 {
   if(gid) {
     if(setgid(gid)<0) {
-      theL()<<Logger::Critical<<"Unable to set effective group id to "<<gid<<": "<<stringerror()<<endl;
+      g_log<<Logger::Critical<<"Unable to set effective group id to "<<gid<<": "<<stringerror()<<endl;
       exit(1);
     }
     else
-      theL()<<Logger::Info<<"Set effective group id to "<<gid<<endl;
+      g_log<<Logger::Info<<"Set effective group id to "<<gid<<endl;
 
     struct passwd *pw=getpwuid(uid);
     if(!pw) {
-      theL()<<Logger::Warning<<"Unable to determine user name for uid "<<uid<<endl;
+      g_log<<Logger::Warning<<"Unable to determine user name for uid "<<uid<<endl;
       if (setgroups(0, NULL)<0) {
-        theL()<<Logger::Critical<<"Unable to drop supplementary gids: "<<stringerror()<<endl;
+        g_log<<Logger::Critical<<"Unable to drop supplementary gids: "<<stringerror()<<endl;
         exit(1);
       }
     } else {
       if (initgroups(pw->pw_name, gid)<0) {
-        theL()<<Logger::Critical<<"Unable to set supplementary groups: "<<stringerror()<<endl;
+        g_log<<Logger::Critical<<"Unable to set supplementary groups: "<<stringerror()<<endl;
         exit(1);
       }
     }
@@ -156,11 +156,11 @@ void Utility::dropUserPrivs( int uid )
 {
   if(uid) {
     if(setuid(uid)<0) {
-      theL()<<Logger::Critical<<"Unable to set effective user id to "<<uid<<":  "<<stringerror()<<endl;
+      g_log<<Logger::Critical<<"Unable to set effective user id to "<<uid<<": "<<stringerror()<<endl;
       exit(1);
     }
     else
-      theL()<<Logger::Info<<"Set effective user id to "<<uid<<endl;
+      g_log<<Logger::Info<<"Set effective user id to "<<uid<<endl;
   }
 }
 
@@ -188,7 +188,7 @@ int Utility::makeGidNumeric(const string &group)
     errno=0;
     struct group *gr=getgrnam(group.c_str());
     if(!gr) {
-      theL()<<Logger::Critical<<"Unable to look up gid of group '"<<group<<"': "<< (errno ? strerror(errno) : "not found") <<endl;
+      g_log<<Logger::Critical<<"Unable to look up gid of group '"<<group<<"': "<< (errno ? strerror(errno) : "not found") <<endl;
       exit(1);
     }
     newgid=gr->gr_gid;
@@ -204,7 +204,7 @@ int Utility::makeUidNumeric(const string &username)
   if(!(newuid=atoi(username.c_str()))) {
     struct passwd *pw=getpwnam(username.c_str());
     if(!pw) {
-      theL()<<Logger::Critical<<"Unable to look up uid of user '"<<username<<"': "<< (errno ? strerror(errno) : "not found") <<endl;
+      g_log<<Logger::Critical<<"Unable to look up uid of user '"<<username<<"': "<< (errno ? strerror(errno) : "not found") <<endl;
       exit(1);
     }
     newuid=pw->pw_uid;
@@ -304,30 +304,3 @@ time_t Utility::timegm(struct tm *const t)
   return ((day + t->tm_hour) * i + t->tm_min) * i + t->tm_sec;
 }
 
-// we have our own gmtime_r because the one in GNU libc violates POSIX/SuS
-// by supporting leap seconds when TZ=right/UTC
-void Utility::gmtime_r(const time_t *timer, struct tm *tmbuf) {
-
-  int monthdays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-  int days = *timer / 86400;
-  int leapdays = (days + 671) / 1461;
-  int leapydays = (days + 365) / 1461;
-
-  tmbuf->tm_hour = *timer / 3600 % 24;
-  tmbuf->tm_min = *timer / 60 % 60;
-  tmbuf->tm_sec = *timer % 60;
-
-  tmbuf->tm_year = (days - leapdays) / 365 + 70;
-  tmbuf->tm_yday = days - leapydays - (tmbuf->tm_year - 70) * 365 + 1;
-
-  tmbuf->tm_mon = 0;
-  tmbuf->tm_mday = tmbuf->tm_yday;
-  monthdays[1] += isleap(tmbuf->tm_year + 1900);
-  while (monthdays[tmbuf->tm_mon] < tmbuf->tm_mday) {
-    tmbuf->tm_mday -= monthdays[tmbuf->tm_mon];
-    tmbuf->tm_mon++;
-  }
-
-  tmbuf->tm_wday = (days + 4) % 7; // Day 0 is magic thursday ;)
-  tmbuf->tm_isdst = 0;
-}

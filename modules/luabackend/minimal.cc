@@ -1,20 +1,25 @@
 /*
-    Copyright (C) 2011 Fredrik Danerklint
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2 as published
-    by the Free Software Foundation
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
-
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ * originally authored by Fredrik Danerklint
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -49,26 +54,30 @@ LUABackend::LUABackend(const string &suffix) {
     }
 
     catch(LUAException &e) {
-        L<<Logger::Error<<backend_name<<"Error: "<<e.what<<endl;
+        g_log<<Logger::Error<<backend_name<<"Error: "<<e.what<<endl;
         throw PDNSException(e.what);
     }
 
 }
 
 LUABackend::~LUABackend() {
-    L<<Logger::Info<<backend_name<<"Closeing..." << endl;
+    try {
+        g_log<<Logger::Info<<backend_name<<"Closing..." << endl;
+    }
+    catch (...) {
+    }
 
     lua_close(lua);
 }
 
 bool LUABackend::list(const DNSName &target, int domain_id, bool include_disabled) {
     if (logging)
-	L << Logger::Info << backend_name << "(list) BEGIN" << endl;
+	g_log << Logger::Info << backend_name << "(list) BEGIN" << endl;
 
     lua_rawgeti(lua, LUA_REGISTRYINDEX, f_lua_list);
 
     lua_pushstring(lua, target.toString().c_str());
-    lua_pushnumber(lua, domain_id);
+    lua_pushinteger(lua, domain_id);
 
     if(lua_pcall(lua, 2, 1, f_lua_exec_error) != 0) {
 	string e = backend_name + lua_tostring(lua, -1);
@@ -86,14 +95,14 @@ bool LUABackend::list(const DNSName &target, int domain_id, bool include_disable
     lua_pop(lua, 1);
 
     if (logging)
-	L << Logger::Info << backend_name << "(list) END" << endl;
+	g_log << Logger::Info << backend_name << "(list) END" << endl;
 
     return ok;
 }
 
 void LUABackend::lookup(const QType &qtype, const DNSName &qname, DNSPacket *p, int domain_id) {
     if (logging)
-	L << Logger::Info << backend_name << "(lookup) BEGIN" << endl;
+	g_log << Logger::Info << backend_name << "(lookup) BEGIN" << endl;
 
     dnspacket = p;
 
@@ -102,7 +111,7 @@ void LUABackend::lookup(const QType &qtype, const DNSName &qname, DNSPacket *p, 
 //    lua_pushnumber(lua, qtype.getCode());
     lua_pushstring(lua, qtype.getName().c_str());
     lua_pushstring(lua, qname.toString().       c_str());
-    lua_pushnumber(lua, domain_id);
+    lua_pushinteger(lua, domain_id);
 
     if(lua_pcall(lua, 3, 0, f_lua_exec_error) != 0) {
 	string e = backend_name + lua_tostring(lua, -1);
@@ -117,12 +126,12 @@ void LUABackend::lookup(const QType &qtype, const DNSName &qname, DNSPacket *p, 
     dnspacket = NULL;
 
     if (logging)
-	L << Logger::Info << backend_name << "(lookup) END" << endl;
+	g_log << Logger::Info << backend_name << "(lookup) END" << endl;
 }
 
 bool LUABackend::get(DNSResourceRecord &rr) {
     if (logging)
-	L << Logger::Info << backend_name << "(get) BEGIN" << endl;
+	g_log << Logger::Info << backend_name << "(get) BEGIN" << endl;
 
     lua_rawgeti(lua, LUA_REGISTRYINDEX, f_lua_get);
 
@@ -157,36 +166,31 @@ bool LUABackend::get(DNSResourceRecord &rr) {
         rr.ttl = ::arg().asNum( "default-ttl" );
 
     getValueFromTable(lua, "content", rr.content);
+    getValueFromTable(lua, "scopeMask", rr.scopeMask);
 
     lua_pop(lua, 1 );
 
     if (logging)
-	L << Logger::Info << backend_name << "(get) END" << endl;
+	g_log << Logger::Info << backend_name << "(get) END" << endl;
 
     return !rr.content.empty();
 }
 
-bool LUABackend::getSOA(const string &name, SOAData &soadata, DNSPacket *p) {
+bool LUABackend::getSOA(const DNSName &name, SOAData &soadata) {
     if (logging)
-	L << Logger::Info << backend_name << "(getsoa) BEGIN" << endl;
-
-    dnspacket = p;
+	g_log << Logger::Info << backend_name << "(getsoa) BEGIN" << endl;
 
     lua_rawgeti(lua, LUA_REGISTRYINDEX, f_lua_getsoa);
 
-    lua_pushstring(lua, name.c_str());
+    lua_pushstring(lua, name.toString().c_str());
 
     if(lua_pcall(lua, 1, 1, f_lua_exec_error) != 0) {
 	string e = backend_name + lua_tostring(lua, -1);
 	lua_pop(lua, 1);
 
-	dnspacket = NULL;
-
 	throw runtime_error(e);
 	return false;
     }
-
-    dnspacket = NULL;
 
     size_t returnedwhat = lua_type(lua, -1);
     if (returnedwhat != LUA_TTABLE) {
@@ -196,6 +200,7 @@ bool LUABackend::getSOA(const string &name, SOAData &soadata, DNSPacket *p) {
 
     soadata.db = this;
     soadata.serial = 0;
+    soadata.qname = name;
     getValueFromTable(lua, "serial", soadata.serial);
     if (soadata.serial == 0) {
 	lua_pop(lua, 1 );
@@ -220,7 +225,7 @@ bool LUABackend::getSOA(const string &name, SOAData &soadata, DNSPacket *p) {
     if (!getValueFromTable(lua, "nameserver", soadata.nameserver)) {
         soadata.nameserver = DNSName(arg()["default-soa-name"]);
         if (soadata.nameserver.empty()) {
-    	    L<<Logger::Error << backend_name << "(getSOA)" << " Error: SOA Record is missing nameserver for the domain '" << name << "'" << endl;
+    	    g_log<<Logger::Error << backend_name << "(getSOA)" << " Error: SOA Record is missing nameserver for the domain '" << name << "'" << endl;
 	    lua_pop(lua, 1 );
             return false;
         }
@@ -232,7 +237,7 @@ bool LUABackend::getSOA(const string &name, SOAData &soadata, DNSPacket *p) {
     lua_pop(lua, 1 );
 
     if (logging)
-	L << Logger::Info << backend_name << "(getsoa) END" << endl;
+	g_log << Logger::Info << backend_name << "(getsoa) END" << endl;
 
     return true;
 }

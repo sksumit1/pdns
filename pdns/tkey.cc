@@ -10,7 +10,7 @@ void PacketHandler::tkeyHandler(DNSPacket *p, DNSPacket *r) {
   bool sign = false;
 
   if (!p->getTKEYRecord(&tkey_in, &name)) {
-    L<<Logger::Error<<"TKEY request but no TKEY RR found"<<endl;
+    g_log<<Logger::Error<<"TKEY request but no TKEY RR found"<<endl;
     r->setRcode(RCode::FormErr);
     return;
   }
@@ -22,7 +22,7 @@ void PacketHandler::tkeyHandler(DNSPacket *p, DNSPacket *r) {
   tkey_out->d_inception = time((time_t*)NULL);
   tkey_out->d_expiration = tkey_out->d_inception+15;
 
-  GssContext ctx(name.toStringNoDot());
+  GssContext ctx(name);
 
   if (tkey_in.d_mode == 3) { // establish context
     if (tkey_in.d_algo == DNSName("gss-tsig.")) {
@@ -71,18 +71,15 @@ void PacketHandler::tkeyHandler(DNSPacket *p, DNSPacket *r) {
   tkey_out->d_keysize = tkey_out->d_key.size();
   tkey_out->d_othersize = tkey_out->d_other.size();
 
-  DNSRecord rec;
-  rec.d_name = name;
-  rec.d_ttl = 0;
-  rec.d_type = QType::TKEY;
-  rec.d_class = QClass::ANY;
-  rec.d_content = tkey_out;
+  DNSZoneRecord zrr;
 
-  DNSResourceRecord rr(rec);
-  rr.qclass = QClass::ANY;
-  rr.qtype = QType::TKEY;
-  rr.d_place = DNSResourceRecord::ANSWER;
-  r->addRecord(rr);
+  zrr.dr.d_name = name;
+  zrr.dr.d_ttl = 0;
+  zrr.dr.d_type = QType::TKEY;
+  zrr.dr.d_class = QClass::ANY;
+  zrr.dr.d_content = tkey_out;
+  zrr.dr.d_place = DNSResourceRecord::ANSWER;
+  r->addRecord(zrr);
 
   if (sign)
   {

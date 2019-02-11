@@ -1,4 +1,5 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2
+from __future__ import print_function
 import glob, json
 
 varnames = set()
@@ -6,7 +7,7 @@ statnames = set()
 runs = list()
 
 for fname in glob.glob('testresults-*.xml'):
-	info = fname[12:-4].split('.')
+	info = fname[12:-4].split('_')
 	tag = info.pop(0)
 	vars = dict(s.split(':') for s in info)
 	vars['tag'] = tag
@@ -24,4 +25,4 @@ for fname in glob.glob('testresults-*.xml'):
 # print varnames
 # print statnames
 
-print json.dumps(runs)
+print(json.dumps(runs))

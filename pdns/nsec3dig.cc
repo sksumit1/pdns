@@ -1,3 +1,24 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -9,7 +30,7 @@
 #include "statbag.hh"
 #include "base32.hh"
 #include "dnssecinfra.hh"
-#include <boost/foreach.hpp>
+
 
 StatBag S;
 
@@ -58,6 +79,11 @@ void proveOrDeny(const nsec3set &nsec3s, const DNSName &qname, const string &sal
   }
 }
 
+void usage() {
+  cerr<<"nsec3dig"<<endl;
+  cerr<<"Syntax: nsec3dig IP-ADDRESS PORT QUESTION QUESTION-TYPE [recurse]\n";
+}
+
 int main(int argc, char** argv)
 try
 {
@@ -65,8 +91,20 @@ try
 
   reportAllTypes();
 
+  for (int i = 1; i < argc; i++) {
+    if ((string) argv[i] == "--help") {
+      usage();
+      return EXIT_SUCCESS;
+    }
+
+    if ((string) argv[i] == "--version") {
+      cerr<<"nsec3dig "<<VERSION<<endl;
+      return EXIT_SUCCESS;
+    }
+  }
+
   if(argc < 5) {
-    cerr<<"Syntax: nsec3dig IP-address port question question-type [recurse]\n";
+    usage();
     exit(EXIT_FAILURE);
   }
 
@@ -117,7 +155,7 @@ try
   string reply(creply, len);
   delete[] creply;
 
-  MOADNSParser mdp(reply);
+  MOADNSParser mdp(false, reply);
   cout<<"Reply to question for qname='"<<mdp.d_qname<<"', qtype="<<DNSRecordContent::NumberToType(mdp.d_qtype)<<endl;
   cout<<"Rcode: "<<mdp.d_header.rcode<<", RD: "<<mdp.d_header.rd<<", QR: "<<mdp.d_header.qr;
   cout<<", TC: "<<mdp.d_header.tc<<", AA: "<<mdp.d_header.aa<<", opcode: "<<mdp.d_header.opcode<<endl;
@@ -133,15 +171,18 @@ try
     {
       // cerr<<"got nsec3 ["<<i->first.d_name<<"]"<<endl;
       // cerr<<i->first.d_content->getZoneRepresentation()<<endl;
-      NSEC3RecordContent r = dynamic_cast<NSEC3RecordContent&> (*(i->first.d_content));
+      const auto r = std::dynamic_pointer_cast<NSEC3RecordContent>(i->first.d_content);
+      if (!r) {
+        continue;
+      }
       // nsec3.insert(new nsec3()
       // cerr<<toBase32Hex(r.d_nexthash)<<endl;
       vector<string> parts;
       string sname=i->first.d_name.toString();
       boost::split(parts, sname /* FIXME400 */, boost::is_any_of("."));
-      nsec3s.insert(make_pair(toLower(parts[0]), toBase32Hex(r.d_nexthash)));
-      nsec3salt = r.d_salt;
-      nsec3iters = r.d_iterations;
+      nsec3s.insert(make_pair(toLower(parts[0]), toBase32Hex(r->d_nexthash)));
+      nsec3salt = r->d_salt;
+      nsec3iters = r->d_iterations;
     }
     else
     {
@@ -174,17 +215,17 @@ try
   set<DNSName> proven;
   set<DNSName> denied;
   namesseen.insert(qname);
-  for(const auto &n: namesseen)
+  for(const auto &name: namesseen)
   {
-    DNSName shorter(n);
+    DNSName shorter(name);
     do {
       namestocheck.insert(shorter);
     } while(shorter.chopOff());
   }
-  for(const auto &n: namestocheck)
+  for(const auto &name: namestocheck)
   {
-    proveOrDeny(nsec3s, n, nsec3salt, nsec3iters, proven, denied);
-    proveOrDeny(nsec3s, DNSName("*")+n, nsec3salt, nsec3iters, proven, denied);
+    proveOrDeny(nsec3s, name, nsec3salt, nsec3iters, proven, denied);
+    proveOrDeny(nsec3s, g_wildcarddnsname+name, nsec3salt, nsec3iters, proven, denied);
   }
 
   if(names.count(qname))
@@ -224,7 +265,7 @@ try
     {
       cout<<"next closer ("<<nextcloser.toString()<<") NOT denied"<<endl;
     }
-    DNSName wcplusencloser=DNSName("*")+encloser;
+    DNSName wcplusencloser=g_wildcarddnsname+encloser;
     if(denied.count(wcplusencloser))
     {
       cout<<"wildcard at encloser ("<<wcplusencloser.toString()<<") is denied correctly"<<endl;
@@ -243,4 +284,8 @@ try
 catch(std::exception &e)
 {
   cerr<<"Fatal: "<<e.what()<<endl;
+}
+catch(PDNSException &e)
+{
+  cerr<<"Fatal: "<<e.reason<<endl;
 }

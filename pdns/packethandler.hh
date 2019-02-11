@@ -1,24 +1,24 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2002 - 2011  PowerDNS.COM BV
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2
-    as published by the Free Software Foundation
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifndef PACKETHANDLER_HH
 #define PACKETHANDLER_HH
 
@@ -29,7 +29,7 @@
 #include "dnspacket.hh"
 #include "packetcache.hh"
 #include "dnsseckeeper.hh"
-#include "lua-auth.hh"
+#include "lua-auth4.hh"
 #include "gss_context.hh"
 
 #include "namespaces.hh"
@@ -55,7 +55,7 @@ class NSEC3PARAMRecordContent;
 class PacketHandler
 {
 public:
-  DNSPacket *questionOrRecurse(DNSPacket *, bool* shouldRecurse); //!< hand us a DNS packet with a question, we'll tell you answer, or that you should recurse
+  DNSPacket *doQuestion(DNSPacket *); //!< hand us a DNS packet with a question, we give you an answer
   DNSPacket *question(DNSPacket *); //!< hand us a DNS packet with a question, we give you an answer
   PacketHandler(); 
   ~PacketHandler(); // defined in packethandler.cc, and does --count
@@ -63,15 +63,17 @@ public:
  
   UeberBackend *getBackend();
 
-  int trySuperMasterSynchronous(DNSPacket *p);
+  int trySuperMasterSynchronous(const DNSPacket *p, const DNSName& tsigkeyname);
   static NetmaskGroup s_allowNotifyFrom;
+  static set<string> s_forwardNotify;
 
 private:
-  int trySuperMaster(DNSPacket *p);
+  int trySuperMaster(DNSPacket *p, const DNSName& tsigkeyname);
   int processNotify(DNSPacket *);
   void addRootReferral(DNSPacket *r);
   int doChaosRequest(DNSPacket *p, DNSPacket *r, DNSName &target);
-  bool addDNSKEY(DNSPacket *p, DNSPacket *r, const SOAData& sd, bool doCDNSKEY);
+  bool addDNSKEY(DNSPacket *p, DNSPacket *r, const SOAData& sd);
+  bool addCDNSKEY(DNSPacket *p, DNSPacket *r, const SOAData& sd);
   bool addCDS(DNSPacket *p, DNSPacket *r, const SOAData& sd);
   bool addNSEC3PARAM(DNSPacket *p, DNSPacket *r, const SOAData& sd);
   int doAdditionalProcessingAndDropAA(DNSPacket *p, DNSPacket *r, const SOAData& sd, bool retargeted);
@@ -89,12 +91,12 @@ private:
 
   void makeNXDomain(DNSPacket* p, DNSPacket* r, const DNSName& target, const DNSName& wildcard, SOAData& sd);
   void makeNOError(DNSPacket* p, DNSPacket* r, const DNSName& target, const DNSName& wildcard, SOAData& sd, int mode);
-  vector<DNSResourceRecord> getBestReferralNS(DNSPacket *p, SOAData& sd, const DNSName &target);
-  vector<DNSResourceRecord> getBestDNAMESynth(DNSPacket *p, SOAData& sd, DNSName &target);
+  vector<DNSZoneRecord> getBestReferralNS(DNSPacket *p, SOAData& sd, const DNSName &target);
+  vector<DNSZoneRecord> getBestDNAMESynth(DNSPacket *p, SOAData& sd, DNSName &target);
   bool tryDNAME(DNSPacket *p, DNSPacket*r, SOAData& sd, DNSName &target);
   bool tryReferral(DNSPacket *p, DNSPacket*r, SOAData& sd, const DNSName &target, bool retargeted);
 
-  bool getBestWildcard(DNSPacket *p, SOAData& sd, const DNSName &target, DNSName &wildcard, vector<DNSResourceRecord>* ret);
+  bool getBestWildcard(DNSPacket *p, SOAData& sd, const DNSName &target, DNSName &wildcard, vector<DNSZoneRecord>* ret);
   bool tryWildcard(DNSPacket *p, DNSPacket*r, SOAData& sd, DNSName &target, DNSName &wildcard, bool& retargeted, bool& nodata);
   bool addDSforNS(DNSPacket* p, DNSPacket* r, SOAData& sd, const DNSName& dsname);
   void completeANYRecords(DNSPacket *p, DNSPacket*r, SOAData& sd, const DNSName &target);
@@ -103,15 +105,16 @@ private:
 
   static AtomicCounter s_count;
   static pthread_mutex_t s_rfc2136lock;
-  bool d_doRecursion;
   bool d_logDNSDetails;
   bool d_doIPv6AdditionalProcessing;
   bool d_doDNAME;
-  int d_sendRootReferral;
-  AuthLua* d_pdl;
+  bool d_doExpandALIAS;
+  std::unique_ptr<AuthLua4> d_pdl;
+  std::unique_ptr<AuthLua4> d_update_policy_lua;
 
   UeberBackend B; // every thread an own instance
   DNSSECKeeper d_dk; // B is shared with DNSSECKeeper
 };
 bool getNSEC3Hashes(bool narrow, DNSBackend* db, int id, const std::string& hashed, bool decrement, DNSName& unhashed, string& before, string& after, int mode=0);
+std::shared_ptr<DNSRecordContent> makeSOAContent(const SOAData& sd);
 #endif /* PACKETHANDLER */

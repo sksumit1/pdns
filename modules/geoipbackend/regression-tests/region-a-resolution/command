@@ -1,2 +1,2 @@
 #!/bin/sh
-nameserver=$geoipregionip cleandig www.geo.example.com A
+cleandig www.geo.example.com A ednssubnet $geoipregionip

@@ -1,5 +1,4 @@
-#ifndef _YAHTTP_ROUTER_HPP
-#define _YAHTTP_ROUTER_HPP 1
+#pragma once
 /* @file 
  * @brief Defines router class and support structures
  */
@@ -65,10 +64,9 @@ If method is left empty, it will match any method. Name is also optional, but ne
 
     static std::pair<std::string, std::string> URLFor(const std::string &name, const strstr_map_t& arguments) { return router.urlFor(name,arguments); }; //<! Generates url from named route and arguments. Missing arguments are assumed empty
     static const TRouteList& GetRoutes() { return router.routes; } //<! Reference to route list 
+    static void Clear() { router.routes.clear(); } //<! Clear all routes
 
     TRouteList routes; //<! Instance variable for routes
   };
 };
-#endif
-
 #endif

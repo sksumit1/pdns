@@ -1,3 +1,24 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -6,13 +27,10 @@
 #include <iostream>
 #include <unistd.h>
 #include "misc.hh"
-#include <boost/lexical_cast.hpp>
-#include "syncres.hh"
 #ifdef __linux__
 #include <sys/epoll.h>
 #endif
 
-#include "namespaces.hh"
 #include "namespaces.hh"
 
 class EpollFDMultiplexer : public FDMultiplexer
@@ -24,11 +42,12 @@ public:
     close(d_epollfd);
   }
 
-  virtual int run(struct timeval* tv);
+  virtual int run(struct timeval* tv, int timeout=500) override;
+  virtual void getAvailableFDs(std::vector<int>& fds, int timeout) override;
 
-  virtual void addFD(callbackmap_t& cbmap, int fd, callbackfunc_t toDo, const funcparam_t& parameter);
-  virtual void removeFD(callbackmap_t& cbmap, int fd);
-  string getName()
+  virtual void addFD(callbackmap_t& cbmap, int fd, callbackfunc_t toDo, const funcparam_t& parameter) override;
+  virtual void removeFD(callbackmap_t& cbmap, int fd) override;
+  string getName() const override
   {
     return "epoll";
   }
@@ -51,8 +70,8 @@ static struct EpollRegisterOurselves
   }
 } doItEpoll;
 
-
 int EpollFDMultiplexer::s_maxevents=1024;
+
 EpollFDMultiplexer::EpollFDMultiplexer() : d_eevents(new epoll_event[s_maxevents])
 {
   d_epollfd=epoll_create(s_maxevents); // not hard max
@@ -95,7 +114,7 @@ void EpollFDMultiplexer::addFD(callbackmap_t& cbmap, int fd, callbackfunc_t toDo
 void EpollFDMultiplexer::removeFD(callbackmap_t& cbmap, int fd)
 {
   if(!cbmap.erase(fd))
-    throw FDMultiplexerException("Tried to remove unlisted fd "+lexical_cast<string>(fd)+ " from multiplexer");
+    throw FDMultiplexerException("Tried to remove unlisted fd "+std::to_string(fd)+ " from multiplexer");
 
   struct epoll_event dummy;
   dummy.events = 0;
@@ -105,15 +124,27 @@ void EpollFDMultiplexer::removeFD(callbackmap_t& cbmap, int fd)
     throw FDMultiplexerException("Removing fd from epoll set: "+stringerror());
 }
 
-int EpollFDMultiplexer::run(struct timeval* now)
+void EpollFDMultiplexer::getAvailableFDs(std::vector<int>& fds, int timeout)
+{
+  int ret=epoll_wait(d_epollfd, d_eevents.get(), s_maxevents, timeout);
+
+  if(ret < 0 && errno!=EINTR)
+    throw FDMultiplexerException("epoll returned error: "+stringerror());
+
+  for(int n=0; n < ret; ++n) {
+    fds.push_back(d_eevents[n].data.fd);
+  }
+}
+
+int EpollFDMultiplexer::run(struct timeval* now, int timeout)
 {
   if(d_inrun) {
     throw FDMultiplexerException("FDMultiplexer::run() is not reentrant!\n");
   }
   
-  int ret=epoll_wait(d_epollfd, d_eevents.get(), s_maxevents, 500);
+  int ret=epoll_wait(d_epollfd, d_eevents.get(), s_maxevents, timeout);
   gettimeofday(now,0); // MANDATORY
-  
+
   if(ret < 0 && errno!=EINTR)
     throw FDMultiplexerException("epoll returned error: "+stringerror());
 
@@ -135,7 +166,7 @@ int EpollFDMultiplexer::run(struct timeval* now)
     }
   }
   d_inrun=false;
-  return 0;
+  return ret;
 }
 
 #if 0

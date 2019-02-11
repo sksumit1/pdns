@@ -1,10 +1,12 @@
 AM_CPPFLAGS += \
-	-I$(top_srcdir)/ext/rapidjson/include \
+	-I$(top_srcdir)/ext/json11 \
 	$(YAHTTP_CFLAGS) \
-	$(MBEDTLS_CFLAGS) \
+	$(LIBCRYPTO_CFLAGS) \
 	$(LIBZMQ_CFLAGS)
 
 AM_LDFLAGS = $(THREADFLAGS)
+
+JSON11_LIBS = $(top_builddir)/ext/json11/libjson11.la
 
 EXTRA_DIST = \
 	OBJECTFILES \
@@ -44,7 +46,7 @@ libremotebackend_la_SOURCES = \
 
 libremotebackend_la_LDFLAGS = -module -avoid-version
 
-libremotebackend_la_LIBADD = $(YAHTTP_LIBS)
+libremotebackend_la_LIBADD = $(YAHTTP_LIBS) $(JSON11_LIBS)
 
 if REMOTEBACKEND_ZEROMQ
 libremotebackend_la_LIBADD += $(LIBZMQ_LIBS)
@@ -93,6 +95,8 @@ BUILT_SOURCES = ../../pdns/dnslabeltext.cc
 
 libtestremotebackend_la_SOURCES = \
 	../../pdns/arguments.hh ../../pdns/arguments.cc \
+	../../pdns/auth-packetcache.cc ../../pdns/auth-packetcache.hh \
+	../../pdns/auth-querycache.cc ../../pdns/auth-querycache.hh \
 	../../pdns/base32.cc \
 	../../pdns/base64.cc \
 	../../pdns/dnsbackend.hh ../../pdns/dnsbackend.cc \
@@ -103,22 +107,24 @@ libtestremotebackend_la_SOURCES = \
 	../../pdns/dnsrecords.cc \
 	../../pdns/dnssecinfra.cc \
 	../../pdns/ednssubnet.cc \
-	../../pdns/json.hh ../../pdns/json.cc \
+	../../pdns/ednsoptions.cc ../../pdns/ednsoptions.hh \
+	../../pdns/iputils.cc \
 	../../pdns/logger.cc \
 	../../pdns/misc.cc \
 	../../pdns/nsecrecords.cc \
-	../../pdns/packetcache.hh ../../pdns/packetcache.cc \
+	../../pdns/packetcache.hh \
 	../../pdns/qtype.cc \
 	../../pdns/sillyrecords.cc \
 	../../pdns/statbag.cc \
 	../../pdns/ueberbackend.hh ../../pdns/ueberbackend.cc \
 	../../pdns/dns.hh ../../pdns/dns.cc \
-	../../pdns/dns_random.cc \
+	../../pdns/dns_random_urandom.cc \
 	../../pdns/dnswriter.cc \
 	../../pdns/nameserver.cc \
 	../../pdns/rcpgenerator.cc \
 	../../pdns/unix_utility.cc \
 	../../pdns/gss_context.cc ../../pdns/gss_context.hh \
+	../../pdns/json.hh ../../pdns/json.cc \
 	httpconnector.cc \
 	pipeconnector.cc \
 	unixconnector.cc \
@@ -129,11 +135,10 @@ libtestremotebackend_la_CPPFLAGS = $(AM_CPPFLAGS)
 
 libtestremotebackend_la_LIBADD = \
 	$(YAHTTP_LIBS) \
-	$(MBEDTLS_LIBS) \
+	$(LIBCRYPTO_LIBS) \
 	$(BOOST_UNIT_TEST_FRAMEWORK_LIBS) \
-	$(BOOST_SERIALIZATION_LIBS) \
 	$(BOOST_PROGRAM_OPTIONS_LIBS) \
-	$(LIBDL)
+	$(LIBDL) $(JSON11_LIBS)
 
 libtestremotebackend_la_LDFLAGS = \
 	$(AM_LDFLAGS) \

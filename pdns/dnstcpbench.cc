@@ -1,24 +1,24 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2002-2013  PowerDNS.COM BV
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2
-    as published by the Free Software Foundation
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -34,10 +34,11 @@
 #include "dnswriter.hh"
 #include "dnsrecords.hh"
 #include "statbag.hh"
+#include "threadname.hh"
 #include <netinet/tcp.h>
 #include <boost/array.hpp>
 #include <boost/program_options.hpp>
-#include <boost/foreach.hpp>
+
 
 StatBag S;
 namespace po = boost::program_options;
@@ -98,7 +99,7 @@ try
     q->udpUsec = makeUsec(now - tv);
     tv=now;
 
-    MOADNSParser mdp(reply);
+    MOADNSParser mdp(false, reply);
     if(!mdp.d_header.tc)
       return;
     g_truncates++;
@@ -148,7 +149,7 @@ try
   q->tcpUsec = makeUsec(now - tv);
   q->answerSecond = now.tv_sec;
 
-  MOADNSParser mdp(reply);
+  MOADNSParser mdp(false, reply);
   //  cout<<"Had correct TCP/IP response, "<<mdp.d_answers.size()<<" answers, aabit="<<mdp.d_header.aa<<endl;
   if(mdp.d_header.aa)
     g_authAnswers++;
@@ -174,6 +175,7 @@ vector<BenchQuery> g_queries;
 
 static void* worker(void*)
 {
+  setThreadName("dnstcpb/worker");
   for(;;) {
     unsigned int pos = g_pos++; 
     if(pos >= g_queries.size())
@@ -184,12 +186,19 @@ static void* worker(void*)
   return 0;
 }
 
+void usage(po::options_description &desc) {
+  cerr<<"Syntax: dnstcpbench REMOTE [PORT] < QUERIES"<<endl;
+  cerr<<"Where QUERIES is one query per line, format: qname qtype, just 1 space"<<endl;
+  cerr<<desc<<endl;
+}
+
 int main(int argc, char** argv)
 try
 {
   po::options_description desc("Allowed options"), hidden, alloptions;
   desc.add_options()
     ("help,h", "produce help message")
+    ("version", "print version number")
     ("verbose,v", "be verbose")
     ("udp-first,u", "try UDP first")
     ("file,f", po::value<string>(), "source file - if not specified, defaults to stdin")
@@ -208,9 +217,14 @@ try
 
   po::store(po::command_line_parser(argc, argv).options(alloptions).positional(p).run(), g_vm);
   po::notify(g_vm);
-  
+
+  if(g_vm.count("version")) {
+    cerr<<"dnstcpbench "<<VERSION<<endl;
+    exit(EXIT_SUCCESS);
+  }
+
   if(g_vm.count("help")) {
-    cout << desc<<endl;
+    usage(desc);
     exit(EXIT_SUCCESS);
   }
   g_tcpNoDelay = g_vm["tcp-no-delay"].as<bool>();
@@ -222,9 +236,7 @@ try
   reportAllTypes();
 
   if(g_vm["remote-host"].empty()) {
-    cerr<<"Syntax: tcpbench remote [port] < queries"<<endl;
-    cerr<<"Where queries is one query per line, format: qname qtype, just 1 space"<<endl;
-    cerr<<desc<<endl;
+    usage(desc);
     exit(EXIT_FAILURE);
   }
 
@@ -240,7 +252,7 @@ try
   }
 
 
-  pthread_t workers[numworkers];
+  std::vector<pthread_t> workers(numworkers);
 
   FILE* fp;
   if(!g_vm.count("file"))
@@ -269,7 +281,7 @@ try
   
   using namespace boost::accumulators;
   typedef accumulator_set<
-    unsigned int
+    double
     , stats<boost::accumulators::tag::median(with_p_square_quantile),
       boost::accumulators::tag::mean(immediate)
     >
@@ -280,13 +292,13 @@ try
   typedef map<time_t, uint32_t> counts_t;
   counts_t counts;
 
-  BOOST_FOREACH(const BenchQuery& bq, g_queries) {
+  for(const BenchQuery& bq :  g_queries) {
     counts[bq.answerSecond]++;
     udpspeeds(bq.udpUsec);
     tcpspeeds(bq.tcpUsec);
   }
 
-  BOOST_FOREACH(const counts_t::value_type& val, counts) {
+  for(const counts_t::value_type& val :  counts) {
     qps(val.second);
   }
 

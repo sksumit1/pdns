@@ -1,3 +1,24 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -7,7 +28,6 @@
 #include "pdns/dns.hh"
 #include "pdns/dnsbackend.hh"
 #include "pdns/dnspacket.hh"
-#include "pdns/ueberbackend.hh"
 #include "pdns/pdnsexception.hh"
 #include "pdns/logger.hh"
 #include "pdns/arguments.hh"
@@ -23,14 +43,35 @@ gPgSQLBackend::gPgSQLBackend(const string &mode, const string &suffix)  : GSQLBa
         	  getArg("host"),
         	  getArg("port"),
         	  getArg("user"),
-        	  getArg("password")));
+        	  getArg("password"),
+        	  getArg("extra-connection-parameters")));
   }
 
   catch(SSqlException &e) {
-    L<<Logger::Error<<mode<<" Connection failed: "<<e.txtReason()<<endl;
+    g_log<<Logger::Error<<mode<<" Connection failed: "<<e.txtReason()<<endl;
     throw PDNSException("Unable to launch "+mode+" connection: "+e.txtReason());
   }
-  L<<Logger::Info<<mode<<" Connection successful. Connected to database '"<<getArg("dbname")<<"' on '"<<getArg("host")<<"'."<<endl;
+  g_log<<Logger::Info<<mode<<" Connection successful. Connected to database '"<<getArg("dbname")<<"' on '"<<getArg("host")<<"'."<<endl;
+}
+
+void gPgSQLBackend::reconnect()
+{
+  freeStatements();
+
+  if (d_db) {
+    d_db->reconnect();
+
+    allocateStatements();
+  }
+}
+
+bool gPgSQLBackend::inTransaction()
+{
+  const auto* db = dynamic_cast<SPgSQL*>(d_db);
+  if (db) {
+    return db->in_trx();
+  }
+  return false;
 }
 
 class gPgSQLFactory : public BackendFactory
@@ -40,11 +81,12 @@ public:
 
   void declareArguments(const string &suffix="")
   {
-    declare(suffix,"dbname","Pdns backend database name to connect to","");
-    declare(suffix,"user","Pdns backend user to connect as","");
-    declare(suffix,"host","Pdns backend host to connect to","");
+    declare(suffix,"dbname","Backend database name to connect to","");
+    declare(suffix,"user","Database backend user to connect as","");
+    declare(suffix,"host","Database backend host to connect to","");
     declare(suffix,"port","Database backend port to connect to","");
-    declare(suffix,"password","Pdns backend password to connect with","");
+    declare(suffix,"password","Database backend password to connect with","");
+    declare(suffix,"extra-connection-parameters", "Extra parameters to add to connection string","");
 
     declare(suffix,"dnssec","Enable DNSSEC processing","no");
 
@@ -59,10 +101,7 @@ public:
     declare(suffix, "list-subzone-query", "Subzone listing", record_query+" disabled=false and (name=$1 OR name like $2) and domain_id=$3");
 
     declare(suffix,"remove-empty-non-terminals-from-zone-query", "remove all empty non-terminals from zone", "delete from records where domain_id=$1 and type is null");
-    declare(suffix, "insert-empty-non-terminal-query", "insert empty non-terminal in zone", "insert into records (domain_id,name,type,disabled,auth) values ($1,$2,null,false,true)");
     declare(suffix,"delete-empty-non-terminal-query", "delete empty non-terminal from zone", "delete from records where domain_id=$1 and name=$2 and type is null");
-
-    declare(suffix,"master-zone-query","Data", "select master from domains where name=$1 and type='SLAVE'");
 
     declare(suffix,"info-zone-query","","select id,name,master,last_check,notified_serial,type,account from domains where name=$1");
 
@@ -70,13 +109,10 @@ public:
     declare(suffix,"supermaster-query","", "select account from supermasters where ip=$1 and nameserver=$2");
     declare(suffix,"supermaster-name-to-ips", "", "select ip,account from supermasters where nameserver=$1 and account=$2");
 
-    declare(suffix,"insert-zone-query","", "insert into domains (type,name) values('NATIVE',$1)");
-    declare(suffix,"insert-slave-query","", "insert into domains (type,name,master,account) values('SLAVE',$1,$2,$3)");
+    declare(suffix,"insert-zone-query","", "insert into domains (type,name,master,account,last_check, notified_serial) values($1,$2,$3,$4,null,null)");
 
-    declare(suffix, "insert-record-query", "", "insert into records (content,ttl,prio,type,domain_id,disabled,name,auth) values ($1,$2,$3,$4,$5,$6,$7,$8)");
-    declare(suffix, "insert-record-order-query", "", "insert into records (content,ttl,prio,type,domain_id,disabled,name,ordername,auth) values ($1,$2,$3,$4,$5,$6,$7,$8,$9)");
-    declare(suffix, "insert-ent-query", "insert empty non-terminal in zone", "insert into records (type,domain_id,disabled,name,auth) values (null,$1,false,$2,$3)");
-    declare(suffix, "insert-ent-order-query", "insert empty non-terminal in zone", "insert into records (type,domain_id,disabled,name,ordername,auth) values (null,$1,false,$2,$3,$4)");
+    declare(suffix, "insert-record-query", "", "insert into records (content,ttl,prio,type,domain_id,disabled,name,ordername,auth) values ($1,$2,$3,$4,$5,$6,$7,$8,$9)");
+    declare(suffix, "insert-empty-non-terminal-order-query", "insert empty non-terminal in zone", "insert into records (type,domain_id,disabled,name,ordername,auth,ttl,prio,content) values (null,$1,false,$2,$3,$4,null,null,null)");
 
     declare(suffix, "get-order-first-query", "DNSSEC Ordering Query, last", "select ordername from records where disabled=false and domain_id=$1 and ordername is not null order by 1 using ~<~ limit 1");
     declare(suffix, "get-order-before-query", "DNSSEC Ordering Query, before", "select ordername, name from records where disabled=false and ordername ~<=~ $1 and domain_id=$2 and ordername is not null order by 1 using ~>~ limit 1");
@@ -93,7 +129,6 @@ public:
     declare(suffix,"update-account-query","", "update domains set account=$1 where name=$2");
     declare(suffix,"update-serial-query","", "update domains set notified_serial=$1 where id=$2");
     declare(suffix,"update-lastcheck-query","", "update domains set last_check=$1 where id=$2");
-    declare(suffix,"zone-lastchange-query", "", "select max(change_date) from records where domain_id=$1");
     declare(suffix,"info-all-master-query","", "select id,name,master,last_check,notified_serial,type from domains where type='MASTER'");
     declare(suffix,"delete-domain-query","", "delete from domains where name=$1");
     declare(suffix,"delete-zone-query","", "delete from records where domain_id=$1");
@@ -101,6 +136,7 @@ public:
     declare(suffix,"delete-names-query","","delete from records where domain_id=$1 and name=$2");
 
     declare(suffix,"add-domain-key-query","", "insert into cryptokeys (domain_id, flags, active, content) select id, $1, $2, $3 from domains where name=$4");
+    declare(suffix,"get-last-inserted-key-id-query","", "select lastval()");
     declare(suffix,"list-domain-keys-query","", "select cryptokeys.id, flags, case when active then 1 else 0 end as active, content from domains, cryptokeys where cryptokeys.domain_id=domains.id and name=$1");
     declare(suffix,"get-all-domain-metadata-query","", "select kind,content from domains, domainmetadata where domainmetadata.domain_id=domains.id and name=$1");
     declare(suffix,"get-domain-metadata-query","", "select content from domains, domainmetadata where domainmetadata.domain_id=domains.id and name=$1 and domainmetadata.kind=$2");
@@ -144,7 +180,7 @@ public:
   gPgSQLLoader()
   {
     BackendMakers().report(new gPgSQLFactory("gpgsql"));
-    L << Logger::Info << "[gpgsqlbackend] This is the gpgsql backend version " VERSION
+    g_log << Logger::Info << "[gpgsqlbackend] This is the gpgsql backend version " VERSION
 #ifndef REPRODUCIBLE
       << " (" __DATE__ " " __TIME__ ")"
 #endif

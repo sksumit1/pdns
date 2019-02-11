@@ -1,3 +1,25 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -7,7 +29,6 @@
 #include "pdns/dns.hh"
 #include "pdns/dnsbackend.hh"
 #include "pdns/dnspacket.hh"
-#include "pdns/ueberbackend.hh"
 #include "pdns/pdnsexception.hh"
 #include "pdns/logger.hh"
 #include "pdns/arguments.hh"
@@ -18,21 +39,27 @@
 gMySQLBackend::gMySQLBackend(const string &mode, const string &suffix)  : GSQLBackend(mode,suffix)
 {
   try {
-    setDB(new SMySQL(getArg("dbname"),
-                     getArg("host"),
-                     getArgAsNum("port"),
-                     getArg("socket"),
-                     getArg("user"),
-                     getArg("password"),
-                     getArg("group"),
-                     mustDo("innodb-read-committed")));
+    reconnect();
   }
 
   catch(SSqlException &e) {
-    L<<Logger::Error<<mode<<" Connection failed: "<<e.txtReason()<<endl;
+    g_log<<Logger::Error<<mode<<" Connection failed: "<<e.txtReason()<<endl;
     throw PDNSException("Unable to launch "+mode+" connection: "+e.txtReason());
   }
-  L<<Logger::Info<<mode<<" Connection successful. Connected to database '"<<getArg("dbname")<<"' on '"<<(getArg("host").empty() ? getArg("socket") : getArg("host"))<<"'."<<endl;
+  g_log<<Logger::Info<<mode<<" Connection successful. Connected to database '"<<getArg("dbname")<<"' on '"<<(getArg("host").empty() ? getArg("socket") : getArg("host"))<<"'."<<endl;
+}
+
+void gMySQLBackend::reconnect()
+{
+  setDB(new SMySQL(getArg("dbname"),
+                   getArg("host"),
+                   getArgAsNum("port"),
+                   getArg("socket"),
+                   getArg("user"),
+                   getArg("password"),
+                   getArg("group"),
+                   mustDo("innodb-read-committed"),
+                   getArgAsNum("timeout")));
 }
 
 class gMySQLFactory : public BackendFactory
@@ -42,14 +69,15 @@ public:
 
   void declareArguments(const string &suffix="")
   {
-    declare(suffix,"dbname","Pdns backend database name to connect to","powerdns");
+    declare(suffix,"dbname","Database name to connect to","powerdns");
     declare(suffix,"user","Database backend user to connect as","powerdns");
     declare(suffix,"host","Database backend host to connect to","");
-    declare(suffix,"port","Database backend port to connect to","0");
-    declare(suffix,"socket","Pdns backend socket to connect to","");
-    declare(suffix,"password","Pdns backend password to connect with","");
-    declare(suffix,"group", "Pdns backend MySQL 'group' to connect as", "client");
+    declare(suffix,"port","Database backend port to connect to","3306");
+    declare(suffix,"socket","Database backend socket to connect to","");
+    declare(suffix,"password","Database backend password to connect with","");
+    declare(suffix,"group", "Database backend MySQL 'group' to connect as", "client");
     declare(suffix,"innodb-read-committed","Use InnoDB READ-COMMITTED transaction isolation level","yes");
+    declare(suffix,"timeout", "The timeout in seconds for each attempt to read/write to the server", "10");
 
     declare(suffix,"dnssec","Enable DNSSEC processing","no");
 
@@ -64,10 +92,7 @@ public:
     declare(suffix, "list-subzone-query", "Subzone listing", record_query+" disabled=0 and (name=? OR name like ?) and domain_id=?");
 
     declare(suffix, "remove-empty-non-terminals-from-zone-query", "remove all empty non-terminals from zone", "delete from records where domain_id=? and type is null");
-    declare(suffix, "insert-empty-non-terminal-query", "insert empty non-terminal in zone", "insert into records (domain_id,name,type,disabled,auth) values (?,?,null,0,1)");
     declare(suffix, "delete-empty-non-terminal-query", "delete empty non-terminal from zone", "delete from records where domain_id=? and name=? and type is null");
-
-    declare(suffix,"master-zone-query","Data", "select master from domains where name=? and type='SLAVE'");
 
     declare(suffix,"info-zone-query","","select id,name,master,last_check,notified_serial,type,account from domains where name=?");
 
@@ -75,17 +100,14 @@ public:
     declare(suffix,"supermaster-query","", "select account from supermasters where ip=? and nameserver=?");
     declare(suffix,"supermaster-name-to-ips", "", "select ip,account from supermasters where nameserver=? and account=?");
 
-    declare(suffix,"insert-zone-query","", "insert into domains (type,name) values('NATIVE',?)");
-    declare(suffix,"insert-slave-query","", "insert into domains (type,name,master,account) values('SLAVE',?,?,?)");
+    declare(suffix,"insert-zone-query","", "insert into domains (type,name,master,account,last_check,notified_serial) values(?,?,?,?,NULL,NULL)");
 
-    declare(suffix, "insert-record-query", "", "insert into records (content,ttl,prio,type,domain_id,disabled,name,auth) values (?,?,?,?,?,?,?,?)");
-    declare(suffix, "insert-record-order-query", "", "insert into records (content,ttl,prio,type,domain_id,disabled,name,ordername,auth) values (?,?,?,?,?,?,?,?,?)");
-    declare(suffix, "insert-ent-query", "insert empty non-terminal in zone", "insert into records (type,domain_id,disabled,name,auth) values (null,?,0,?,?)");
-    declare(suffix, "insert-ent-order-query", "insert empty non-terminal in zone", "insert into records (type,domain_id,disabled,name,ordername,auth) values (null,?,0,?,?,?)");
+    declare(suffix, "insert-record-query", "", "insert into records (content,ttl,prio,type,domain_id,disabled,name,ordername,auth) values (?,?,?,?,?,?,?,?,?)");
+    declare(suffix, "insert-empty-non-terminal-order-query", "insert empty non-terminal in zone", "insert into records (type,domain_id,disabled,name,ordername,auth,content,ttl,prio) values (null,?,0,?,?,?,NULL,NULL,NULL)");
 
     declare(suffix, "get-order-first-query", "DNSSEC Ordering Query, first", "select ordername from records where domain_id=? and disabled=0 and ordername is not null order by 1 asc limit 1");
     declare(suffix, "get-order-before-query", "DNSSEC Ordering Query, before", "select ordername, name from records where ordername <= ? and domain_id=? and disabled=0 and ordername is not null order by 1 desc limit 1");
-    declare(suffix, "get-order-after-query", "DNSSEC Ordering Query, after", "select min(ordername) from records where ordername > ? and domain_id=? and disabled=0 and ordername is not null");
+    declare(suffix, "get-order-after-query", "DNSSEC Ordering Query, after", "select ordername from records where ordername > ? and domain_id=? and disabled=0 and ordername is not null order by 1 asc limit 1");
     declare(suffix, "get-order-last-query", "DNSSEC Ordering Query, last", "select ordername, name from records where ordername != '' and domain_id=? and disabled=0 and ordername is not null order by 1 desc limit 1");
 
     declare(suffix, "update-ordername-and-auth-query", "DNSSEC update ordername and auth for a qname query", "update records set ordername=?,auth=? where domain_id=? and name=? and disabled=0");
@@ -98,7 +120,6 @@ public:
     declare(suffix,"update-account-query","", "update domains set account=? where name=?");
     declare(suffix,"update-serial-query","", "update domains set notified_serial=? where id=?");
     declare(suffix,"update-lastcheck-query","", "update domains set last_check=? where id=?");
-    declare(suffix,"zone-lastchange-query", "", "select max(change_date) from records where domain_id=?");
     declare(suffix,"info-all-master-query","", "select id,name,master,last_check,notified_serial,type from domains where type='MASTER'");
     declare(suffix,"delete-domain-query","", "delete from domains where name=?");
     declare(suffix,"delete-zone-query","", "delete from records where domain_id=?");
@@ -106,6 +127,7 @@ public:
     declare(suffix,"delete-names-query","","delete from records where domain_id=? and name=?");
 
     declare(suffix,"add-domain-key-query","", "insert into cryptokeys (domain_id, flags, active, content) select id, ?, ?, ? from domains where name=?");
+    declare(suffix,"get-last-inserted-key-id-query", "", "select LAST_INSERT_ID()");
     declare(suffix,"list-domain-keys-query","", "select cryptokeys.id, flags, active, content from domains, cryptokeys where cryptokeys.domain_id=domains.id and name=?");
     declare(suffix,"get-all-domain-metadata-query","", "select kind,content from domains, domainmetadata where domainmetadata.domain_id=domains.id and name=?");
     declare(suffix,"get-domain-metadata-query","", "select content from domains, domainmetadata where domainmetadata.domain_id=domains.id and name=? and domainmetadata.kind=?");
@@ -148,7 +170,7 @@ public:
   gMySQLLoader()
   {
     BackendMakers().report(new gMySQLFactory("gmysql"));
-    L << Logger::Info << "[gmysqlbackend] This is the gmysql backend version " VERSION
+    g_log << Logger::Info << "[gmysqlbackend] This is the gmysql backend version " VERSION
 #ifndef REPRODUCIBLE
       << " (" __DATE__ " " __TIME__ ")"
 #endif

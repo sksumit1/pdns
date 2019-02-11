@@ -5,12 +5,12 @@
 #endif
 #include <boost/test/unit_test.hpp>
 #include <boost/assign/std/map.hpp>
-#include <boost/foreach.hpp>
+
 #include "base64.hh"
 
 using namespace boost;
 
-BOOST_AUTO_TEST_SUITE(base64_cc)
+BOOST_AUTO_TEST_SUITE(test_base64_cc)
 
 BOOST_AUTO_TEST_CASE(test_Base64_Roundtrip) {
   std::string before("Some Random String"), after;
@@ -64,7 +64,7 @@ BOOST_AUTO_TEST_CASE(test_Base64_Encode) {
     ("eSHBt7Xx5F7A4HFtabXEzDLD01bnSiG","ZVNIQnQ3WHg1RjdBNEhGdGFiWEV6RExEMDFiblNpRw==")
     ("dq4KydZjmcoQQ45VYBP2EDR8FqKaMul0","ZHE0S3lkWmptY29RUTQ1VllCUDJFRFI4RnFLYU11bDA=");
 
-  BOOST_FOREACH(const cases_t::value_type& val, cases) {
+  for(const cases_t::value_type& val :  cases) {
     std::string encoded = Base64Encode(val.first), decoded;
     BOOST_CHECK_EQUAL(encoded, val.second);
     decoded.clear();

@@ -1,3 +1,24 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -6,15 +27,12 @@
 #include <iostream>
 #include <unistd.h>
 #include "misc.hh"
-#include <boost/lexical_cast.hpp>
-#include "syncres.hh"
 #include <sys/types.h>
-#if defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
+#if defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || defined(__NetBSD__)
 #include <sys/event.h>
 #endif
 #include <sys/time.h>
 
-#include "namespaces.hh"
 #include "namespaces.hh"
 
 class KqueueFDMultiplexer : public FDMultiplexer
@@ -26,11 +44,12 @@ public:
     close(d_kqueuefd);
   }
 
-  virtual int run(struct timeval* tv);
+  virtual int run(struct timeval* tv, int timeout=500) override;
+  virtual void getAvailableFDs(std::vector<int>& fds, int timeout) override;
 
-  virtual void addFD(callbackmap_t& cbmap, int fd, callbackfunc_t toDo, const boost::any& parameter);
-  virtual void removeFD(callbackmap_t& cbmap, int fd);
-  string getName()
+  virtual void addFD(callbackmap_t& cbmap, int fd, callbackfunc_t toDo, const boost::any& parameter) override;
+  virtual void removeFD(callbackmap_t& cbmap, int fd) override;
+  string getName() const override
   {
     return "kqueue";
   }
@@ -67,7 +86,7 @@ void KqueueFDMultiplexer::addFD(callbackmap_t& cbmap, int fd, callbackfunc_t toD
 
   struct kevent kqevent;
   EV_SET(&kqevent, fd, (&cbmap == &d_readCallbacks) ? EVFILT_READ : EVFILT_WRITE, EV_ADD, 0,0,0);
-  
+
   if(kevent(d_kqueuefd, &kqevent, 1, 0, 0, 0) < 0) {
     cbmap.erase(fd);
     throw FDMultiplexerException("Adding fd to kqueue set: "+stringerror());
@@ -85,19 +104,35 @@ void KqueueFDMultiplexer::removeFD(callbackmap_t& cbmap, int fd)
     throw FDMultiplexerException("Removing fd from kqueue set: "+stringerror());
 }
 
-int KqueueFDMultiplexer::run(struct timeval* now)
+void KqueueFDMultiplexer::getAvailableFDs(std::vector<int>& fds, int timeout)
+{
+  struct timespec ts;
+  ts.tv_sec=timeout/1000;
+  ts.tv_nsec=(timeout % 1000) * 1000000;
+
+  int ret = kevent(d_kqueuefd, 0, 0, d_kevents.get(), s_maxevents, &ts);
+
+  if(ret < 0 && errno != EINTR)
+    throw FDMultiplexerException("kqueue returned error: "+stringerror());
+
+  for(int n=0; n < ret; ++n) {
+    fds.push_back(d_kevents[n].ident);
+  }
+}
+
+int KqueueFDMultiplexer::run(struct timeval* now, int timeout)
 {
   if(d_inrun) {
     throw FDMultiplexerException("FDMultiplexer::run() is not reentrant!\n");
   }
   
   struct timespec ts;
-  ts.tv_sec=0;
-  ts.tv_nsec=500000000U;
+  ts.tv_sec=timeout/1000;
+  ts.tv_nsec=(timeout % 1000) * 1000000;
 
   int ret=kevent(d_kqueuefd, 0, 0, d_kevents.get(), s_maxevents, &ts);
   gettimeofday(now,0); // MANDATORY!
-  
+
   if(ret < 0 && errno!=EINTR)
     throw FDMultiplexerException("kqueue returned error: "+stringerror());
 
@@ -121,7 +156,7 @@ int KqueueFDMultiplexer::run(struct timeval* now)
   }
 
   d_inrun=false;
-  return 0;
+  return ret;
 }
 
 #if 0

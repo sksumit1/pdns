@@ -1,3 +1,24 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -5,10 +26,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <boost/foreach.hpp>
+
 #include <sstream>
-#include "rapidjson/stringbuffer.h"
-#include "rapidjson/writer.h"
 #include "pdns/lock.hh"
 
 #ifndef UNIX_PATH_MAX
@@ -28,7 +47,7 @@ HTTPConnector::HTTPConnector(std::map<std::string,std::string> options) {
     this->d_socket = NULL;
 
     if (options.find("timeout") != options.end()) {
-      this->timeout = boost::lexical_cast<int>(options.find("timeout")->second)/1000;
+      this->timeout = std::stoi(options.find("timeout")->second)/1000;
     }
     if (options.find("post") != options.end()) {
       std::string val = options.find("post")->second;
@@ -49,49 +68,23 @@ HTTPConnector::~HTTPConnector() {
       delete d_socket;
 }
 
-// converts json value into string
-bool HTTPConnector::json2string(const rapidjson::Value &input, std::string &output) {
-   if (input.IsString()) output = input.GetString();
-   else if (input.IsNull()) output = "";
-   else if (input.IsUint64()) output = lexical_cast<std::string>(input.GetUint64());
-   else if (input.IsInt64()) output = lexical_cast<std::string>(input.GetInt64());
-   else if (input.IsUint()) output = lexical_cast<std::string>(input.GetUint());
-   else if (input.IsInt()) output = lexical_cast<std::string>(input.GetInt());
-   else return false;
-   return true;
-}
-
-void HTTPConnector::addUrlComponent(const rapidjson::Value &parameters, const char *element, std::stringstream& ss) {
-    rapidjson::Value nullval;
+void HTTPConnector::addUrlComponent(const Json &parameters, const string& element, std::stringstream& ss) {
     std::string sparam;
-    nullval.SetNull();
-    const rapidjson::Value& param = (parameters.HasMember(element)?parameters[element]:nullval);
-    if (param.IsNull() == false) {
-       json2string(param, sparam);
-       ss << "/" << sparam;
-    }
+    if (parameters[element] != Json())
+       ss << "/" << asString(parameters[element]);
 }
 
-template <class T> std::string buildMemberListArgs(std::string prefix, const T* value) {
+std::string HTTPConnector::buildMemberListArgs(std::string prefix, const Json& args) {
     std::stringstream stream;
 
-    for (rapidjson::Value::ConstMemberIterator itr = value->MemberBegin(); itr != value->MemberEnd(); itr++) {
-        stream << prefix << "[" << itr->name.GetString() << "]=";
-
-        if (itr->value.IsUint64()) {
-            stream << itr->value.GetUint64();
-        } else if (itr->value.IsInt64()) {
-            stream << itr->value.GetInt64();
-        } else if (itr->value.IsUint()) {
-            stream << itr->value.GetUint();
-        } else if (itr->value.IsInt()) {
-            stream << itr->value.GetInt();
-        } else if (itr->value.IsBool()) {
-            stream << (itr->value.GetBool() ? 1 : 0);
-        } else if (itr->value.IsString()) {
-            stream << YaHTTP::Utility::encodeURL(itr->value.GetString(), false);
+    for(const auto& pair: args.object_items()) {
+        if (pair.second.is_bool()) {
+          stream << (pair.second.bool_value()?"1":"0");
+        } else if (pair.second.is_null()) {
+          stream << prefix << "[" << pair.first << "]=";
+        } else {
+          stream << prefix << "[" << pair.first << "]=" << this->asString(pair.second);
         }
-
         stream << "&";
     }
 
@@ -99,7 +92,7 @@ template <class T> std::string buildMemberListArgs(std::string prefix, const T* 
 }
 
 // builds our request (near-restful)
-void HTTPConnector::restful_requestbuilder(const std::string &method, const rapidjson::Value &parameters, YaHTTP::Request& req)
+void HTTPConnector::restful_requestbuilder(const std::string &method, const Json& parameters, YaHTTP::Request& req)
 {
     std::stringstream ss;
     std::string sparam;
@@ -125,130 +118,124 @@ void HTTPConnector::restful_requestbuilder(const std::string &method, const rapi
     // set the correct type of request based on method
     if (method == "activateDomainKey" || method == "deactivateDomainKey") {
         // create an empty post
+        req.preparePost();
         verb = "POST";
     } else if (method == "setTSIGKey") {
-        req.POST()["algorithm"] = parameters["algorithm"].GetString();
-        req.POST()["content"] = parameters["content"].GetString();
+        req.POST()["algorithm"] = parameters["algorithm"].string_value();
+        req.POST()["content"] = parameters["content"].string_value();
         req.preparePost();
         verb = "PATCH";
     } else if (method == "deleteTSIGKey") {
         verb = "DELETE";
     } else if (method == "addDomainKey") {
-        const rapidjson::Value& param = parameters["key"];
-        json2string(param["flags"],sparam);
-        req.POST()["flags"] = sparam;
-        req.POST()["active"] = (param["active"].GetBool() ? "1" : "0");
-        req.POST()["content"] = param["content"].GetString();
+        const Json& param = parameters["key"];
+        req.POST()["flags"] = asString(param["flags"]);
+        req.POST()["active"] = (param["active"].bool_value() ? "1" : "0");
+        req.POST()["content"] = param["content"].string_value();
         req.preparePost();
         verb = "PUT";
-    } else if (method == "isMaster") {
-        addUrlComponent(parameters, "ip", ss);
-        verb = "GET";
     } else if (method == "superMasterBackend") {
         std::stringstream ss2;
         addUrlComponent(parameters, "ip", ss);
         addUrlComponent(parameters, "domain", ss);
         // then we need to serialize rrset payload into POST
-        size_t index = 0;
-        for(rapidjson::Value::ConstValueIterator itr = parameters["nsset"].Begin(); itr != parameters["nsset"].End(); itr++) {
-            index++;
-            ss2 << buildMemberListArgs("nsset[" + boost::lexical_cast<std::string>(index) + "]", itr) << "&";
+        for(size_t index = 0; index < parameters["nsset"].array_items().size(); index++) {
+            ss2 << buildMemberListArgs("nsset[" + std::to_string(index) + "]", parameters["nsset"][index]) << "&";
         }
         req.body = ss2.str().substr(0, ss2.str().size()-1);
         req.headers["content-type"] = "application/x-www-form-urlencoded; charset=utf-8";
-        req.headers["content-length"] = boost::lexical_cast<std::string>(req.body.size());
+        req.headers["content-length"] = std::to_string(req.body.size());
         verb = "POST";
     } else if (method == "createSlaveDomain") {
         addUrlComponent(parameters, "ip", ss);
         addUrlComponent(parameters, "domain", ss);
-        if (parameters.HasMember("account")) {
-           req.POST()["account"] = parameters["account"].GetString();
+        if (parameters["account"].is_null() == false && parameters["account"].is_string()) {
+           req.POST()["account"] = parameters["account"].string_value();
         }
         req.preparePost();
         verb = "PUT";
     } else if (method == "replaceRRSet") {
         std::stringstream ss2;
-        size_t index = 0;
-        for(rapidjson::Value::ConstValueIterator itr = parameters["rrset"].Begin(); itr != parameters["rrset"].End(); itr++) {
-            index++;
-            ss2 << buildMemberListArgs("rrset[" + boost::lexical_cast<std::string>(index) + "]", itr);
+        for(size_t index = 0; index < parameters["rrset"].array_items().size(); index++) {
+            ss2 << buildMemberListArgs("rrset[" + std::to_string(index) + "]", parameters["rrset"][index]);
         }
         req.body = ss2.str();
         req.headers["content-type"] = "application/x-www-form-urlencoded; charset=utf-8";
-        req.headers["content-length"] = boost::lexical_cast<std::string>(req.body.size());
+        req.headers["content-length"] = std::to_string(req.body.size());
         verb = "PATCH";
     } else if (method == "feedRecord") {
         addUrlComponent(parameters, "trxid", ss);
-        req.body = buildMemberListArgs("rr", &parameters["rr"]);
+        req.body = buildMemberListArgs("rr", parameters["rr"]);
         req.headers["content-type"] = "application/x-www-form-urlencoded; charset=utf-8";
-        req.headers["content-length"] = boost::lexical_cast<std::string>(req.body.size());
+        req.headers["content-length"] = std::to_string(req.body.size());
         verb = "PATCH";
     } else if (method == "feedEnts") {
         std::stringstream ss2;
         addUrlComponent(parameters, "trxid", ss);
-        for(rapidjson::Value::ConstValueIterator itr = parameters["nonterm"].Begin(); itr != parameters["nonterm"].End(); itr++) {
-          ss2 << "nonterm[]=" << YaHTTP::Utility::encodeURL(itr->GetString(), false) << "&";
+        for(const auto& param: parameters["nonterm"].array_items()) {
+          ss2 << "nonterm[]=" << YaHTTP::Utility::encodeURL(param.string_value(), false) << "&";
+        }
+        for(const auto& param: parameters["auth"].array_items()) {
+          ss2 << "auth[]=" << (param["auth"].bool_value()?"1":"0") << "&";
         }
         req.body = ss2.str().substr(0, ss2.str().size()-1);
         req.headers["content-type"] = "application/x-www-form-urlencoded; charset=utf-8";
-        req.headers["content-length"] = boost::lexical_cast<std::string>(req.body.size());
+        req.headers["content-length"] = std::to_string(req.body.size());
         verb = "PATCH";
     } else if (method == "feedEnts3") {
         std::stringstream ss2;
         addUrlComponent(parameters, "domain", ss);
         addUrlComponent(parameters, "trxid", ss);
-        ss2 << "times=" << parameters["times"].GetInt() << "&salt=" << YaHTTP::Utility::encodeURL(parameters["salt"].GetString(), false) << "&narrow=" << (parameters["narrow"].GetBool() ? 1 : 0) << "&";
-        for(rapidjson::Value::ConstValueIterator itr = parameters["nonterm"].Begin(); itr != parameters["nonterm"].End(); itr++) {
-          ss2 << "nonterm[]=" << YaHTTP::Utility::encodeURL(itr->GetString(), false) << "&";
+        ss2 << "times=" << parameters["times"].int_value() << "&salt=" << YaHTTP::Utility::encodeURL(parameters["salt"].string_value(), false) << "&narrow=" << (parameters["narrow"].bool_value() ? 1 : 0) << "&";
+        for(const auto& param: parameters["nonterm"].array_items()) {
+          ss2 << "nonterm[]=" << YaHTTP::Utility::encodeURL(param.string_value(), false) << "&";
+        }
+        for(const auto& param: parameters["auth"].array_items()) {
+          ss2 << "auth[]=" << (param["auth"].bool_value()?"1":"0") << "&";
         }
         req.body = ss2.str().substr(0, ss2.str().size()-1);
         req.headers["content-type"] = "application/x-www-form-urlencoded; charset=utf-8";
-        req.headers["content-length"] = boost::lexical_cast<std::string>(req.body.size());
+        req.headers["content-length"] = std::to_string(req.body.size());
         verb = "PATCH";
     } else if (method == "startTransaction") {
         addUrlComponent(parameters, "domain", ss);
         addUrlComponent(parameters, "trxid", ss);
+        req.preparePost();
         verb = "POST";
     } else if (method == "commitTransaction" || method == "abortTransaction") {
         addUrlComponent(parameters, "trxid", ss);
-        verb = "POST";
-    } else if (method == "calculateSOASerial") {
-        addUrlComponent(parameters, "domain", ss);
-        req.body = buildMemberListArgs("sd", &parameters["sd"]);
-        req.headers["content-type"] = "application/x-www-form-urlencoded; charset=utf-8";
-        req.headers["content-length"] = boost::lexical_cast<std::string>(req.body.size());
+        req.preparePost();
         verb = "POST";
     } else if (method == "setDomainMetadata") {
         // copy all metadata values into post
         std::stringstream ss2;
-        const rapidjson::Value& param = parameters["value"];
         // this one has values too
-        if (param.IsArray()) {
-           for(rapidjson::Value::ConstValueIterator i = param.Begin(); i != param.End(); i++) {
-              ss2 << "value[]=" << YaHTTP::Utility::encodeURL(i->GetString(), false) << "&";
+        if (parameters["value"].is_array()) {
+           for(const auto& val: parameters["value"].array_items()) {
+              ss2 << "value[]=" << YaHTTP::Utility::encodeURL(val.string_value(), false) << "&";
            }
         }
         req.body = ss2.str().substr(0, ss2.str().size()-1);
         req.headers["content-type"] = "application/x-www-form-urlencoded; charset=utf-8";
-        req.headers["content-length"] = boost::lexical_cast<std::string>(req.body.size());
+        req.headers["content-length"] = std::to_string(req.body.size());
         verb = "PATCH";
     } else if (method == "removeDomainKey") {
         // this one is delete
         verb = "DELETE";
     } else if (method == "setNotified") {
-        json2string(parameters["serial"],sparam);
-        req.POST()["serial"] = sparam;
+        req.POST()["serial"] = std::to_string(parameters["serial"].number_value());
         req.preparePost();
         verb = "PATCH";
     } else if (method == "directBackendCmd") {
-        json2string(parameters["query"],sparam);
-        req.POST()["query"] = sparam;
+        req.POST()["query"] = parameters["query"].string_value();
         req.preparePost();
         verb = "POST";
     } else if (method == "searchRecords" || method == "searchComments") {
-        json2string(parameters["pattern"],sparam);
-        req.GET()["pattern"] = sparam;
-        req.GET()["maxResults"] = boost::lexical_cast<std::string>(parameters["maxResults"].GetInt());
+        req.GET()["pattern"] = parameters["pattern"].string_value();
+        req.GET()["maxResults"] = std::to_string(parameters["maxResults"].int_value());
+        verb = "GET";
+   } else if (method == "getAllDomains") {
+        req.GET()["includeDisabled"] = (parameters["include_disabled"].bool_value()?"true":"false");
         verb = "GET";
     } else {
         // perform normal get
@@ -256,17 +243,16 @@ void HTTPConnector::restful_requestbuilder(const std::string &method, const rapi
     }
 
     // put everything else into headers
-    for (rapidjson::Value::ConstMemberIterator iter = parameters.MemberBegin(); iter != parameters.MemberEnd(); ++iter) {
-      std::string member = iter->name.GetString();
+    for(const auto& pair: parameters.object_items()) {
+      std::string member = pair.first;
       // whitelist header parameters
       if ((member == "trxid" ||
            member == "local" || 
            member == "remote" ||
            member == "real-remote" ||
-           member == "zone-id") && 
-          json2string(parameters[member.c_str()], sparam)) {
+           member == "zone-id")) {
         std::string hdr = "x-remotebackend-" + member;
-        req.headers[hdr] = sparam;
+        req.headers[hdr] = asString(pair.second);
       }
     };
 
@@ -277,32 +263,28 @@ void HTTPConnector::restful_requestbuilder(const std::string &method, const rapi
     req.headers["accept"] = "application/json";
 }
 
-
-void HTTPConnector::post_requestbuilder(const rapidjson::Document &input, YaHTTP::Request& req) {
+void HTTPConnector::post_requestbuilder(const Json& input, YaHTTP::Request& req) {
     if (this->d_post_json) {
+        std::string out = input.dump();
         req.setup("POST", d_url);
         // simple case, POST JSON into url. nothing fancy.
-        std::string out = makeStringFromDocument(input);
         req.headers["Content-Type"] = "text/javascript; charset=utf-8";
-        req.headers["Content-Length"] = boost::lexical_cast<std::string>(out.size());
+        req.headers["Content-Length"] = std::to_string(out.size());
         req.headers["accept"] = "application/json";
         req.body = out;
     } else {
         std::stringstream url,content;
         // call url/method.suffix
-        rapidjson::StringBuffer output;
-        rapidjson::Writer<rapidjson::StringBuffer> w(output);
-        input["parameters"].Accept(w);
-        url << d_url << "/" << input["method"].GetString() << d_url_suffix;
+        url << d_url << "/" << input["method"].string_value() << d_url_suffix;
         req.setup("POST", url.str());
         // then build content
-        req.POST()["parameters"] = output.GetString();
+        req.POST()["parameters"] = input["parameters"].dump();
         req.preparePost();
         req.headers["accept"] = "application/json";
     }
 }
 
-int HTTPConnector::send_message(const rapidjson::Document &input) {
+int HTTPConnector::send_message(const Json& input) {
     int rv,ec,fd;
     
     std::vector<std::string> members;
@@ -315,7 +297,7 @@ int HTTPConnector::send_message(const rapidjson::Document &input) {
     if (d_post)
       post_requestbuilder(input, req);
     else
-      restful_requestbuilder(input["method"].GetString(), input["parameters"], req);
+      restful_requestbuilder(input["method"].string_value(), input["parameters"], req);
 
     rv = -1;
     req.headers["connection"] = "Keep-Alive"; // see if we can streamline requests (not needed, strictly speaking)
@@ -331,9 +313,9 @@ int HTTPConnector::send_message(const rapidjson::Document &input) {
           d_socket->writenWithTimeout(out.str().c_str(), out.str().size(), timeout);
           rv = 1;
         } catch (NetworkError& ne) {
-          L<<Logger::Error<<"While writing to HTTP endpoint "<<d_addr.toStringWithPort()<<": "<<ne.what()<<std::endl;
+          g_log<<Logger::Error<<"While writing to HTTP endpoint "<<d_addr.toStringWithPort()<<": "<<ne.what()<<std::endl;
         } catch (...) {
-          L<<Logger::Error<<"While writing to HTTP endpoint "<<d_addr.toStringWithPort()<<": exception caught"<<std::endl;
+          g_log<<Logger::Error<<"While writing to HTTP endpoint "<<d_addr.toStringWithPort()<<": exception caught"<<std::endl;
         }
       }
     }
@@ -348,7 +330,7 @@ int HTTPConnector::send_message(const rapidjson::Document &input) {
     } else {
       // connect using tcp
       struct addrinfo *gAddr, *gAddrPtr, hints;
-      std::string sPort = boost::lexical_cast<std::string>(req.url.port);
+      std::string sPort = std::to_string(req.url.port);
       memset(&hints,0,sizeof hints);
       hints.ai_family = AF_UNSPEC;
       hints.ai_flags = AI_ADDRCONFIG; 
@@ -367,9 +349,9 @@ int HTTPConnector::send_message(const rapidjson::Document &input) {
             d_socket->writenWithTimeout(out.str().c_str(), out.str().size(), timeout);
             rv = 1;
           } catch (NetworkError& ne) {
-            L<<Logger::Error<<"While writing to HTTP endpoint "<<d_addr.toStringWithPort()<<": "<<ne.what()<<std::endl;
+            g_log<<Logger::Error<<"While writing to HTTP endpoint "<<d_addr.toStringWithPort()<<": "<<ne.what()<<std::endl;
           } catch (...) {
-            L<<Logger::Error<<"While writing to HTTP endpoint "<<d_addr.toStringWithPort()<<": exception caught"<<std::endl;
+            g_log<<Logger::Error<<"While writing to HTTP endpoint "<<d_addr.toStringWithPort()<<": exception caught"<<std::endl;
           }
 
           if (rv > -1) break;
@@ -380,14 +362,14 @@ int HTTPConnector::send_message(const rapidjson::Document &input) {
         }
         freeaddrinfo(gAddr);
       } else {
-        L<<Logger::Error<<"Unable to resolve " << req.url.host << ": " << gai_strerror(ec) << std::endl;
+        g_log<<Logger::Error<<"Unable to resolve " << req.url.host << ": " << gai_strerror(ec) << std::endl;
       }
     }
 
     return rv;
 }
 
-int HTTPConnector::recv_message(rapidjson::Document &output) {
+int HTTPConnector::recv_message(Json& output) {
     YaHTTP::AsyncResponseLoader arl;
     YaHTTP::Response resp;
 
@@ -401,25 +383,24 @@ int HTTPConnector::recv_message(rapidjson::Document &output) {
 
     try {
       t0 = time((time_t*)NULL);
-      while(arl.ready() == false && (labs(time((time_t*)NULL) - t0) <= timeout/1000)) {
+      while(arl.ready() == false && (labs(time((time_t*)NULL) - t0) <= timeout)) {
         rd = d_socket->readWithTimeout(buffer, sizeof(buffer), timeout);
         if (rd==0) 
           throw NetworkError("EOF while reading");
         if (rd<0)
           throw NetworkError(std::string(strerror(rd)));
-        buffer[rd] = 0;
         arl.feed(std::string(buffer, rd));
       }
       // timeout occured.
       if (arl.ready() == false)
         throw NetworkError("timeout");
     } catch (NetworkError &ne) {
-      L<<Logger::Error<<"While reading from HTTP endpoint "<<d_addr.toStringWithPort()<<": "<<ne.what()<<std::endl; 
+      g_log<<Logger::Error<<"While reading from HTTP endpoint "<<d_addr.toStringWithPort()<<": "<<ne.what()<<std::endl; 
       delete d_socket;
       d_socket = NULL;
       fail = true;
     } catch (...) {
-      L<<Logger::Error<<"While reading from HTTP endpoint "<<d_addr.toStringWithPort()<<": exception caught"<<std::endl;
+      g_log<<Logger::Error<<"While reading from HTTP endpoint "<<d_addr.toStringWithPort()<<": exception caught"<<std::endl;
       delete d_socket;
       fail = true;
     }
@@ -435,15 +416,11 @@ int HTTPConnector::recv_message(rapidjson::Document &output) {
       return -1;
     }
 
-    rapidjson::StringStream ss(resp.body.c_str());
     int rv = -1;
-    output.ParseStream<0>(ss);
-
-    // offer whatever we read in send_message
-    if (output.HasParseError() == false)
-       rv = rd;
-    else
-       rv = -1;
+    std::string err;
+    output = Json::parse(resp.body, err);
+    if (output != nullptr) return resp.body.size();
+    g_log<<Logger::Error<<"Cannot parse JSON reply: "<<err<<endl;
 
     return rv;
 }

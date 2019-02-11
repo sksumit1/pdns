@@ -1,3 +1,24 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #pragma once
 #include <map>
 #include <time.h>
@@ -5,7 +26,7 @@
 
 /**
    General idea: many threads submit work to this class, but only one executes it. The work should therefore be entirely trivial.
-   The implementatin is that submitter threads create an object that represents the work, and it gets sent over a pipe 
+   The implementation is that submitter threads create an object that represents the work, and it gets sent over a pipe 
    to the worker thread.
 
    The worker thread meanwhile listens on this pipe (non-blocking), with a delay set to the next object that needs to be executed.
@@ -38,7 +59,6 @@ public:
   void submit(T& t, int msec); //!< don't try for more than 4294 msec
 
 private:
-  std::thread d_thread;
   void worker();
   struct Combo
   {
@@ -60,6 +80,7 @@ private:
   };
   std::multimap<struct timespec, T, tscomp> d_work;
   void gettime(struct timespec* ts);
+  std::thread d_thread;
 };
 
 #include "delaypipe.cc"

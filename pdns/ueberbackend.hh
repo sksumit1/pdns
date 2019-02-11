@@ -1,24 +1,24 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2002 - 2011  PowerDNS.COM BV
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2
-    as published by the Free Software Foundation
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifndef UEBERBACKEND_HH
 #define UEBERBACKEND_HH
 
@@ -29,11 +29,7 @@
 #include <pthread.h>
 #include <semaphore.h>
 
-#include <sys/un.h>
-#include <dlfcn.h>
 #include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -55,7 +51,6 @@ class UeberBackend : public boost::noncopyable
 public:
   UeberBackend(const string &pname="default");
   ~UeberBackend();
-  typedef DNSBackend *BackendMaker(); //!< typedef for functions returning pointers to new backends
 
   bool superMasterBackend(const string &ip, const DNSName &domain, const vector<DNSResourceRecord>&nsset, string *nameserver, string *account, DNSBackend **db);
 
@@ -66,6 +61,7 @@ public:
   static pthread_mutex_t instances_lock;
 
   static bool loadmodule(const string &name);
+  static bool loadModules(const vector<string>& modules, const string& path);
 
   static void go(void);
 
@@ -79,7 +75,7 @@ public:
   class handle
   {
   public:
-    bool get(DNSResourceRecord &r);
+    bool get(DNSZoneRecord &dr);
     handle();
     ~handle();
 
@@ -103,21 +99,22 @@ public:
 
   void lookup(const QType &, const DNSName &qdomain, DNSPacket *pkt_p=0,  int zoneId=-1);
 
-  bool getAuth(DNSPacket *p, SOAData *sd, const DNSName &target);
-  bool getSOA(const DNSName &domain, SOAData &sd, DNSPacket *p=0);
-  bool getSOAUncached(const DNSName &domain, SOAData &sd, DNSPacket *p=0);  // same, but ignores cache
-  bool list(const DNSName &target, int domain_id, bool include_disabled=false);
-  bool get(DNSResourceRecord &r);
+  /** Determines if we are authoritative for a zone, and at what level */
+  bool getAuth(const DNSName &target, const QType &qtype, SOAData* sd, bool cachedOk=true);
+  bool getSOA(const DNSName &domain, SOAData &sd);
+  /** Load SOA info from backends, ignoring the cache.*/
+  bool getSOAUncached(const DNSName &domain, SOAData &sd);
+  bool get(DNSZoneRecord &r);
   void getAllDomains(vector<DomainInfo> *domains, bool include_disabled=false);
 
-  static DNSBackend *maker(const map<string,string> &);
   void getUnfreshSlaveInfos(vector<DomainInfo>* domains);
   void getUpdatedMasters(vector<DomainInfo>* domains);
-  bool getDomainInfo(const DNSName &domain, DomainInfo &di);
+  bool getDomainInfo(const DNSName &domain, DomainInfo &di, bool getSerial=true);
   bool createDomain(const DNSName &domain);
   
-  int addDomainKey(const DNSName& name, const DNSBackend::KeyData& key);
-  bool getDomainKeys(const DNSName& name, unsigned int kind, std::vector<DNSBackend::KeyData>& keys);
+  bool doesDNSSEC();
+  bool addDomainKey(const DNSName& name, const DNSBackend::KeyData& key, int64_t& id);
+  bool getDomainKeys(const DNSName& name, std::vector<DNSBackend::KeyData>& keys);
   bool getAllDomainMetadata(const DNSName& name, std::map<std::string, std::vector<std::string> >& meta);
   bool getDomainMetadata(const DNSName& name, const std::string& kind, std::vector<std::string>& meta);
   bool setDomainMetadata(const DNSName& name, const std::string& kind, const std::vector<std::string>& meta);
@@ -125,9 +122,6 @@ public:
   bool removeDomainKey(const DNSName& name, unsigned int id);
   bool activateDomainKey(const DNSName& name, unsigned int id);
   bool deactivateDomainKey(const DNSName& name, unsigned int id);
-
-  bool getDirectNSECx(uint32_t id, const string &hashed, const QType &qtype, DNSName &before, DNSResourceRecord &rr);
-  bool getDirectRRSIGs(const DNSName &signer, const DNSName &qname, const QType &qtype, vector<DNSResourceRecord> &rrsigs);
 
   bool getTSIGKey(const DNSName& name, DNSName* algorithm, string* content);
   bool setTSIGKey(const DNSName& name, const DNSName& algorithm, const string& content);
@@ -140,14 +134,13 @@ public:
   bool searchRecords(const string &pattern, int maxResults, vector<DNSResourceRecord>& result);
   bool searchComments(const string &pattern, int maxResults, vector<Comment>& result);
 private:
-  pthread_t tid;
+  pthread_t d_tid;
   handle d_handle;
-  vector<DNSResourceRecord> d_answers;
-  vector<DNSResourceRecord>::const_iterator d_cachehandleiter;
+  vector<DNSZoneRecord> d_answers;
+  vector<DNSZoneRecord>::const_iterator d_cachehandleiter;
 
   static pthread_mutex_t d_mut;
   static pthread_cond_t d_cond;
-  static sem_t d_dynserialize;
 
   struct Question
   {
@@ -157,17 +150,17 @@ private:
   }d_question;
 
   unsigned int d_cache_ttl, d_negcache_ttl;
-  int domain_id;
+  int d_domain_id;
   int d_ancount;
 
   bool d_negcached;
   bool d_cached;
   static bool d_go;
-  bool stale;
+  bool d_stale;
 
-  int cacheHas(const Question &q, vector<DNSResourceRecord> &rrs);
+  int cacheHas(const Question &q, vector<DNSZoneRecord> &rrs);
   void addNegCache(const Question &q);
-  void addCache(const Question &q, const vector<DNSResourceRecord> &rrs);
+  void addCache(const Question &q, const vector<DNSZoneRecord> &rrs);
   
 };
 

@@ -4,12 +4,14 @@ DIST_SUBDIRS = \
 	bindbackend \
 	geoipbackend \
 	gmysqlbackend \
+	godbcbackend \
 	goraclebackend \
 	gpgsqlbackend \
 	gsqlite3backend \
 	ldapbackend \
 	lmdbbackend \
 	luabackend \
+	lua2backend \
 	mydnsbackend \
 	opendbxbackend \
 	oraclebackend \

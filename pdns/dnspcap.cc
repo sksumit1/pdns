@@ -1,3 +1,24 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #define __FAVOR_BSD
 #ifdef HAVE_CONFIG_H
 #include "config.h"
@@ -11,7 +32,7 @@ PcapPacketReader::PcapPacketReader(const string& fname) : d_fname(fname)
 {
   d_fp=fopen(fname.c_str(),"r");
   if(!d_fp)
-    unixDie("Unable to open file");
+    unixDie("Unable to open file " + fname);
   
   int flags=fcntl(fileno(d_fp),F_GETFL,0);
   fcntl(fileno(d_fp), F_SETFL,flags&(~O_NONBLOCK)); // bsd needs this in stdin (??)
@@ -71,39 +92,83 @@ try
 
     checkedFreadSize(d_buffer, d_pheader.caplen);
 
-    if(d_pheader.caplen!=d_pheader.len) {
+    if(d_pheader.caplen < d_pheader.len) {
       d_runts++;
       continue;
     }
 
-    d_ether=reinterpret_cast<struct ether_header*>(d_buffer);
-    d_lcc=reinterpret_cast<struct pdns_lcc_header*>(d_buffer);
+    if (d_pheader.caplen < d_skipMediaHeader) {
+      d_runts++;
+      continue;
+    }
 
     d_ip=reinterpret_cast<struct ip*>(d_buffer + d_skipMediaHeader);
     d_ip6=reinterpret_cast<struct ip6_hdr*>(d_buffer + d_skipMediaHeader);
     uint16_t contentCode=0;
-    if(d_pfh.linktype==1) 
+
+    if(d_pfh.linktype==1) {
+      if (d_pheader.caplen < sizeof(*d_ether)) {
+        d_runts++;
+        continue;
+      }
+      d_ether=reinterpret_cast<struct ether_header*>(d_buffer);
       contentCode=ntohs(d_ether->ether_type);
+    }
     else if(d_pfh.linktype==101) {
+      if (d_pheader.caplen < (d_skipMediaHeader + sizeof(*d_ip))) {
+        d_runts++;
+        continue;
+      }
       if(d_ip->ip_v==4)
 	contentCode = 0x0800;
       else
-	contentCode = 0x0806; 
+	contentCode = 0x86dd;
     }
-    else if(d_pfh.linktype==113)
+    else if(d_pfh.linktype==113) {
+      if (d_pheader.caplen < sizeof(*d_lcc)) {
+        d_runts++;
+        continue;
+      }
+      d_lcc=reinterpret_cast<struct pdns_lcc_header*>(d_buffer);
       contentCode=ntohs(d_lcc->lcc_protocol);
+    }
 
     if(contentCode==0x0800 && d_ip->ip_p==17) { // udp
+      if (d_pheader.caplen < (d_skipMediaHeader + (4 * d_ip->ip_hl) + sizeof(*d_udp))) {
+        d_runts++;
+        continue;
+      }
       d_udp=reinterpret_cast<const struct udphdr*>(d_buffer + d_skipMediaHeader + 4 * d_ip->ip_hl);
       d_payload = (unsigned char*)d_udp + sizeof(struct udphdr);
       d_len = ntohs(d_udp->uh_ulen) - sizeof(struct udphdr);
+      if (d_pheader.caplen < (d_skipMediaHeader + (4 * d_ip->ip_hl) + sizeof(*d_udp) + d_len)) {
+        d_runts++;
+        continue;
+      }
+      if((const char*)d_payload + d_len > d_buffer + d_pheader.caplen) {
+	d_runts++;
+	continue;
+      }
       d_correctpackets++;
       return true;
     }
-    if(contentCode==0x86dd && d_ip6->ip6_ctlun.ip6_un1.ip6_un1_nxt==17) { // udpv6, we ignore anything with extension hdr
+    else if(contentCode==0x86dd && d_ip6->ip6_ctlun.ip6_un1.ip6_un1_nxt==17) { // udpv6, we ignore anything with extension hdr
+      if (d_pheader.caplen < (d_skipMediaHeader + sizeof(struct ip6_hdr) + sizeof(struct udphdr))) {
+        d_runts++;
+        continue;
+      }
       d_udp=reinterpret_cast<const struct udphdr*>(d_buffer + d_skipMediaHeader + sizeof(struct ip6_hdr));
       d_payload = (unsigned char*)d_udp + sizeof(struct udphdr);
       d_len = ntohs(d_udp->uh_ulen) - sizeof(struct udphdr);
+      if (d_pheader.caplen < (d_skipMediaHeader + sizeof(struct ip6_hdr) + sizeof(struct udphdr) + d_len)) {
+        d_runts++;
+        continue;
+      }
+      if((const char*)d_payload + d_len > d_buffer + d_pheader.caplen) {
+	d_runts++;
+	continue;
+      }
+
       d_correctpackets++;
       return true;
     }
@@ -112,7 +177,7 @@ try
     }
   }
 }
-catch(EofException) {
+catch(const EofException&) {
   return false;
 }
 
@@ -146,7 +211,12 @@ ComboAddress PcapPacketReader::getDest() const
   return ret;
 }
 
-PcapPacketWriter::PcapPacketWriter(const string& fname, PcapPacketReader& ppr) : d_fname(fname), d_ppr(ppr)
+PcapPacketWriter::PcapPacketWriter(const string& fname, const PcapPacketReader& ppr) : PcapPacketWriter(fname)
+{
+  setPPR(ppr);
+}
+
+PcapPacketWriter::PcapPacketWriter(const string& fname) : d_fname(fname)
 {
   d_fp=fopen(fname.c_str(),"w");
   if(!d_fp)
@@ -154,14 +224,20 @@ PcapPacketWriter::PcapPacketWriter(const string& fname, PcapPacketReader& ppr) :
   
   int flags=fcntl(fileno(d_fp),F_GETFL,0);
   fcntl(fileno(d_fp), F_SETFL,flags&(~O_NONBLOCK)); // bsd needs this in stdin (??)
-
-  fwrite(&ppr.d_pfh, 1, sizeof(ppr.d_pfh), d_fp);
 }
 
 void PcapPacketWriter::write()
 {
-  fwrite(&d_ppr.d_pheader, 1, sizeof(d_ppr.d_pheader), d_fp);
-  fwrite(d_ppr.d_buffer, 1, d_ppr.d_pheader.caplen, d_fp);
+  if (!d_ppr) {
+    return;
+  }
+
+  if(d_first) {
+    fwrite(&d_ppr->d_pfh, 1, sizeof(d_ppr->d_pfh), d_fp);
+    d_first=false;
+  }
+  fwrite(&d_ppr->d_pheader, 1, sizeof(d_ppr->d_pheader), d_fp);
+  fwrite(d_ppr->d_buffer, 1, d_ppr->d_pheader.caplen, d_fp);
 }
 
 PcapPacketWriter::~PcapPacketWriter()

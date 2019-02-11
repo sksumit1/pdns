@@ -1,10 +1,30 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 #include <bitset>
 #include "dnsparser.hh"
 #include "iputils.hh"
-#undef L
 #include <boost/program_options.hpp>
 
 #include <boost/format.hpp>
@@ -17,6 +37,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <grp.h>
+#include <unistd.h>
 #include "dnsrecords.hh"
 #include "mplexer.hh"
 #include "statbag.hh"
@@ -30,7 +51,7 @@ po::variables_map g_vm;
 
 StatBag S;
 
-SelectFDMultiplexer g_fdm;
+FDMultiplexer* g_fdm;
 int g_pdnssocket;
 bool g_verbose;
 
@@ -57,9 +78,11 @@ try
 {
   char buffer[1500];
   struct NotificationInFlight nif;
+  /* make sure we report enough room for IPv6 */
+  nif.source.sin4.sin_family = AF_INET6;
   nif.origSocket = fd;
 
-  socklen_t socklen=sizeof(nif.source);
+  socklen_t socklen=nif.source.getSocklen();
 
   int res=recvfrom(fd, buffer, sizeof(buffer), 0, (struct sockaddr*)&nif.source, &socklen);
   if(!res)
@@ -68,8 +91,7 @@ try
   if(res < 0) 
     throw runtime_error("reading packet from remote: "+stringerror());
     
-  string packet(buffer, res);
-  MOADNSParser mdp(packet);
+  MOADNSParser mdp(true, string(buffer,res));
   nif.domain = mdp.d_qname;
   nif.origID = mdp.d_header.id;
 
@@ -128,8 +150,10 @@ try
 {
   char buffer[1500];
   struct NotificationInFlight nif;
+  /* make sure we report enough room for IPv6 */
+  nif.source.sin4.sin_family = AF_INET6;
 
-  socklen_t socklen=sizeof(nif.source);
+  socklen_t socklen=nif.source.getSocklen();
 
   int len=recvfrom(fd, buffer, sizeof(buffer), 0, (struct sockaddr*)&nif.source, &socklen);
   if(!len)
@@ -139,7 +163,7 @@ try
     throw runtime_error("reading packet from remote: "+stringerror());
     
   string packet(buffer, len);
-  MOADNSParser mdp(packet);
+  MOADNSParser mdp(false, packet);
 
   //  cerr<<"Inside notification response for: "<<mdp.d_qname<<endl;
 
@@ -153,10 +177,6 @@ try
   if(nif.domain != mdp.d_qname) {
     syslogFmt(boost::format("Response from inner nameserver for different domain '%s' than original notification '%s'") % mdp.d_qname.toString() % nif.domain.toString());
   } else {
-    struct dnsheader dh;
-    memcpy(&dh, buffer, sizeof(dh));
-    dh.id = nif.origID;
-    
     if(sendto(nif.origSocket, buffer, len, 0, (sockaddr*) &nif.source, nif.source.getSocklen()) < 0) {
       syslogFmt(boost::format("Unable to send notification response to external nameserver %s - %s") % nif.source.toStringWithPort() % stringerror());
     }
@@ -186,15 +206,26 @@ void expireOldNotifications()
 
 void daemonize(int null_fd);
 
+void usage(po::options_description &desc) {
+  cerr<<"nproxy"<<endl;
+  cerr<<desc<<endl;
+}
+
 int main(int argc, char** argv)
 try
 {
   reportAllTypes();
   openlog("nproxy", LOG_NDELAY | LOG_PID, LOG_DAEMON);
 
+  g_fdm = FDMultiplexer::getMultiplexerSilent();
+  if(!g_fdm) {
+    throw std::runtime_error("Could not enable a multiplexer");
+  }
+  
   po::options_description desc("Allowed options");
   desc.add_options()
     ("help,h", "produce help message")
+    ("version", "print the version")
     ("powerdns-address", po::value<string>(), "IP address of PowerDNS server")
     ("chroot", po::value<string>(), "chroot to this directory for additional security")
     ("setuid", po::value<int>(), "setuid to this numerical user id")
@@ -209,12 +240,18 @@ try
   po::notify(g_vm);
 
   if (g_vm.count("help")) {
-    cerr << desc << "\n";
+    usage(desc);
+    return EXIT_SUCCESS;
+  }
+
+  if (g_vm.count("version")) {
+    cerr << "nproxy " << VERSION << endl;
     return EXIT_SUCCESS;
   }
 
   if(!g_vm.count("powerdns-address")) {
-    cerr<<"Mandatory setting 'powerdns-address' unset:\n"<<desc<<endl;
+    cerr<<"Mandatory setting 'powerdns-address' unset:\n"<<endl;
+    usage(desc);
     return EXIT_FAILURE;
   }
 
@@ -240,7 +277,7 @@ try
     if(::bind(sock,(sockaddr*) &local, local.getSocklen()) < 0)
       throw runtime_error("Binding socket for incoming packets to '"+ local.toStringWithPort()+"': "+stringerror());
 
-    g_fdm.addReadFD(sock, handleOutsideUDPPacket); // add to fdmultiplexer for each socket
+    g_fdm->addReadFD(sock, handleOutsideUDPPacket); // add to fdmultiplexer for each socket
     syslogFmt(boost::format("Listening for external notifications on address %s") % local.toStringWithPort());
   }
 
@@ -261,7 +298,7 @@ try
 
   syslogFmt(boost::format("Sending notifications from %s to internal address %s") % originAddress.toString() % pdns.toStringWithPort());
 
-  g_fdm.addReadFD(g_pdnssocket, handleInsideUDPPacket);
+  g_fdm->addReadFD(g_pdnssocket, handleInsideUDPPacket);
 
   int null_fd=open("/dev/null",O_RDWR); /* open stdin */
   if(null_fd < 0)
@@ -275,7 +312,7 @@ try
 
   if(g_vm.count("setgid")) {
     if(setgid(g_vm["setgid"].as<int>()) < 0)
-      throw runtime_error("while changing gid to "+boost::lexical_cast<std::string>(g_vm["setgid"].as<int>()));
+      throw runtime_error("while changing gid to "+std::to_string(g_vm["setgid"].as<int>()));
     syslogFmt(boost::format("Changed gid to %d") % g_vm["setgid"].as<int>());
     if(setgroups(0, NULL) < 0)
       throw runtime_error("while dropping supplementary groups");
@@ -283,7 +320,7 @@ try
 
   if(g_vm.count("setuid")) {
     if(setuid(g_vm["setuid"].as<int>()) < 0)
-      throw runtime_error("while changing uid to "+boost::lexical_cast<std::string>(g_vm["setuid"].as<int>()));
+      throw runtime_error("while changing uid to "+std::to_string(g_vm["setuid"].as<int>()));
     syslogFmt(boost::format("Changed uid to %d") % g_vm["setuid"].as<int>());
   }
 
@@ -299,7 +336,7 @@ try
   struct timeval now;
   for(;;) {
     gettimeofday(&now, 0);
-    g_fdm.run(&now);
+    g_fdm->run(&now);
     // check for notifications that have been outstanding for more than 10 seconds
     expireOldNotifications();
   }

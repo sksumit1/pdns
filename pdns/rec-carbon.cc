@@ -8,35 +8,30 @@
 #include "logger.hh"
 #include "arguments.hh"
 #include "lock.hh"
-#include <boost/foreach.hpp>
+
 
 void doCarbonDump(void*)
 try
 {
-  string hostname, carbonServer;
+  string hostname;
+  string instance_name;
+  string namespace_name;
+  vector<string> carbonServers;
 
   {
     Lock l(&g_carbon_config_lock);
-    carbonServer=arg()["carbon-server"];
+    stringtok(carbonServers, arg()["carbon-server"], ", ");
+    namespace_name=arg()["carbon-namespace"];
     hostname=arg()["carbon-ourname"];
+    instance_name=arg()["carbon-instance"];
   }
 
-  if(carbonServer.empty())
+  if(carbonServers.empty())
     return;
 
-  RecursorControlParser rcp; // inits if needed
-  ComboAddress remote(carbonServer, 2003);
-  Socket s(remote.sin4.sin_family, SOCK_STREAM);
-
-  s.setNonBlocking();
-  s.connect(remote);  // we do the connect so the attempt happens while we gather stats
- 
-  typedef map<string,string> all_t;
-  all_t all=getAllStatsMap();
-
-  ostringstream str;
-  time_t now=time(0);
-
+  if(namespace_name.empty()) {
+    namespace_name="pdns";
+  }
   if(hostname.empty()) {
     char tmp[80];
     memset(tmp, 0, sizeof(tmp));
@@ -47,22 +42,48 @@ try
     hostname=tmp;
     boost::replace_all(hostname, ".", "_");    
   }
-  BOOST_FOREACH(const all_t::value_type& val, all) {
-    str<<"pdns."<<hostname<<".recursor."<<val.first<<' '<<val.second<<' '<<now<<"\r\n";
+  if(instance_name.empty()) {
+    instance_name="recursor";
   }
-  const string msg = str.str();
 
-  int ret=asendtcp(msg, &s);     // this will actually do the right thing waiting on the connect
-  if(ret < 0)
-    L<<Logger::Warning<<"Error writing carbon data to "<<remote.toStringWithPort()<<": "<<strerror(errno)<<endl;
-  if(ret==0)
-    L<<Logger::Warning<<"Timeout connecting/writing carbon data to "<<remote.toStringWithPort()<<endl;
+  registerAllStats();
+  string msg;
+  for(const auto& carbonServer: carbonServers) {
+    ComboAddress remote(carbonServer, 2003);
+    Socket s(remote.sin4.sin_family, SOCK_STREAM);
+
+    s.setNonBlocking();
+    s.connect(remote);  // we do the connect so the first attempt happens while we gather stats
+ 
+    if(msg.empty()) {
+      typedef map<string,string> all_t;
+      all_t all=getAllStatsMap();
+      
+      ostringstream str;
+      time_t now=time(0);
+      
+      for(const all_t::value_type& val :  all) {
+        str<<namespace_name<<'.'<<hostname<<'.'<<instance_name<<'.'<<val.first<<' '<<val.second<<' '<<now<<"\r\n";
+      }
+      msg = str.str();
+    }
+
+    int ret=asendtcp(msg, &s);     // this will actually do the right thing waiting on the connect
+    if(ret < 0)
+      g_log<<Logger::Warning<<"Error writing carbon data to "<<remote.toStringWithPort()<<": "<<strerror(errno)<<endl;
+    if(ret==0)
+      g_log<<Logger::Warning<<"Timeout connecting/writing carbon data to "<<remote.toStringWithPort()<<endl;
+  }
  }
 catch(PDNSException& e)
 {
-  L<<Logger::Error<<"Error in carbon thread: "<<e.reason<<endl;
+  g_log<<Logger::Error<<"Error in carbon thread: "<<e.reason<<endl;
 }
 catch(std::exception& e)
 {
-  L<<Logger::Error<<"Error in carbon thread: "<<e.what()<<endl;
+  g_log<<Logger::Error<<"Error in carbon thread: "<<e.what()<<endl;
+}
+catch(...)
+{
+  g_log<<Logger::Error<<"Unknown error in carbon thread"<<endl;
 }

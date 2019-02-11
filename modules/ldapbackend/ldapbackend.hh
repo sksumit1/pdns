@@ -1,26 +1,29 @@
 /*
- *  PowerDNS LDAP Backend
- *  Copyright (C) 2003-2007 Norbert Sendetzky <norbert@linuxnetworks.de>
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ * originally authored by Norbert Sendetzky
  *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License version 2
- *  as published by the Free Software Foundation.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
  *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
  *
- *  You should have received a copy of the GNU General Public License
- *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
-
-
-
 #include <algorithm>
 #include <sstream>
 #include <utility>
+#include <list>
 #include <string>
 #include <cstdlib>
 #include <cctype>
@@ -29,7 +32,6 @@
 #include "pdns/utility.hh"
 #include "pdns/dnspacket.hh"
 #include "pdns/dnsbackend.hh"
-#include "pdns/ueberbackend.hh"
 #include "pdns/pdnsexception.hh"
 #include "pdns/arguments.hh"
 #include "pdns/logger.hh"
@@ -44,95 +46,142 @@
 using std::string;
 using std::vector;
 
-
+class LdapAuthenticator;
 
 /*
  *  Known DNS RR types
  *  Types which aren't active are currently not supported by PDNS
  */
 
-static const char* ldap_attrany[] = {
-        "associatedDomain",
-        "dNSTTL",
-        "aRecord",
-        "nSRecord",
-        "cNAMERecord",
-        "sOARecord",
-        "pTRRecord",
-        "hInfoRecord",
-        "mXRecord",
-        "tXTRecord",
-        "rPRecord",
-        "aFSDBRecord",
-//        "SigRecord",
-        "KeyRecord",
-//        "gPosRecord",
-        "aAAARecord",
-        "lOCRecord",
-        "sRVRecord",
-        "nAPTRRecord",
-        "kXRecord",
-        "certRecord",
-//        "a6Record",
-//        "dNameRecord",
-//        "aPLRecord",
-        "dSRecord",
-        "sSHFPRecord",
-        "iPSecKeyRecord",
-        "rRSIGRecord",
-        "nSECRecord",
-        "dNSKeyRecord",
-        "dHCIDRecord",
-        "sPFRecord",
-        "modifyTimestamp",
-        NULL
+__attribute__ ((unused)) static const char* ldap_attrany[] = {
+  "associatedDomain",
+  "dNSTTL",
+  "ALIASRecord",
+  "aRecord",
+  "nSRecord",
+  "cNAMERecord",
+  "sOARecord",
+  "pTRRecord",
+  "hInfoRecord",
+  "mXRecord",
+  "tXTRecord",
+  "rPRecord",
+  "aFSDBRecord",
+//  "SigRecord",
+  "KeyRecord",
+//  "gPosRecord",
+  "aAAARecord",
+  "lOCRecord",
+  "sRVRecord",
+  "nAPTRRecord",
+  "kXRecord",
+  "certRecord",
+//  "a6Record",
+  "dNameRecord",
+//  "aPLRecord",
+  "dSRecord",
+  "sSHFPRecord",
+  "iPSecKeyRecord",
+  "rRSIGRecord",
+  "nSECRecord",
+  "dNSKeyRecord",
+  "dHCIDRecord",
+  "nSEC3Record",
+  "nSEC3PARAMRecord",
+  "tLSARecord",
+  "cDSRecord",
+  "cDNSKeyRecord",
+  "openPGPKeyRecord",
+  "sPFRecord",
+  "EUI48Record",
+  "EUI64Record",
+  "tKeyRecord",
+  "uRIRecord",
+  "cAARecord",
+  "TYPE65226Record",
+  "TYPE65534Record",
+  "modifyTimestamp",
+  "PdnsRecordTTL",
+  "PdnsRecordAuth",
+  "PdnsRecordOrdername",
+  NULL
 };
 
 
 
 class LdapBackend : public DNSBackend
 {
-        bool m_getdn;
-        bool m_qlog;
-        int m_msgid;
-        uint32_t m_ttl;
-        uint32_t m_default_ttl;
-        unsigned int m_axfrqlen;
-        time_t m_last_modified;
-        string m_myname;
-        DNSName m_qname;
-        PowerLDAP* m_pldap;
-        PowerLDAP::sentry_t m_result;
-        PowerLDAP::sentry_t::iterator m_attribute;
-        vector<string>::iterator m_value;
-        vector<DNSName>::iterator m_adomain;
-        vector<DNSName> m_adomains;
+    string d_myname;
 
-        bool (LdapBackend::*m_list_fcnt)( const DNSName&, int );
-        void (LdapBackend::*m_lookup_fcnt)( const QType&, const DNSName&, DNSPacket*, int );
-        bool (LdapBackend::*m_prepare_fcnt)();
+    bool d_qlog;
+    uint32_t d_default_ttl;
+    int d_reconnect_attempts;
 
-        bool list_simple( const DNSName& target, int domain_id );
-        bool list_strict( const DNSName& target, int domain_id );
+    bool d_getdn;
+    PowerLDAP::SearchResult::Ptr d_search;
+    PowerLDAP::sentry_t d_result;
+    bool d_in_list;
 
-        void lookup_simple( const QType& qtype, const DNSName& qdomain, DNSPacket* p, int zoneid );
-        void lookup_strict( const QType& qtype, const DNSName& qdomain, DNSPacket* p, int zoneid );
-        void lookup_tree( const QType& qtype, const DNSName& qdomain, DNSPacket* p, int zoneid );
+    struct DNSResult {
+      QType qtype;
+      DNSName qname;
+      uint32_t ttl;
+      time_t lastmod;
+      std::string value;
+      bool auth;
+      std::string ordername;
 
-        bool prepare();
-        bool prepare_simple();
-        bool prepare_strict();
+      DNSResult()
+        : ttl( 0 ), lastmod( 0 ), value( "" ), auth( true ), ordername( "" )
+      {
+      }
+    };
+    std::list<DNSResult> d_results_cache;
 
-        bool getDomainInfo( const string& domain, DomainInfo& di );
+    DNSName d_qname;
+    QType d_qtype;
 
-public:
+    PowerLDAP* d_pldap;
+    LdapAuthenticator *d_authenticator;
 
-        LdapBackend( const string &suffix="" );
-        ~LdapBackend();
+    bool (LdapBackend::*d_list_fcnt)( const DNSName&, int );
+    void (LdapBackend::*d_lookup_fcnt)( const QType&, const DNSName&, DNSPacket*, int );
 
-        bool list( const DNSName& target, int domain_id, bool include_disabled=false );
-        void lookup( const QType& qtype, const DNSName& qdomain, DNSPacket* p = 0, int zoneid = -1 );
-        bool get( DNSResourceRecord& rr );
+    bool list_simple( const DNSName& target, int domain_id );
+    bool list_strict( const DNSName& target, int domain_id );
+
+    void lookup_simple( const QType& qtype, const DNSName& qdomain, DNSPacket* p, int zoneid );
+    void lookup_strict( const QType& qtype, const DNSName& qdomain, DNSPacket* p, int zoneid );
+    void lookup_tree( const QType& qtype, const DNSName& qdomain, DNSPacket* p, int zoneid );
+
+    bool reconnect();
+
+    // Extracts common attributes from the current result stored in d_result and sets them in the given DNSResult.
+    // This will modify d_result by removing attributes that may interfere with the records extraction later.
+    void extract_common_attributes( DNSResult &result );
+
+    // Extract LDAP attributes for the current result stored in d_result and create a new DNSResult that will
+    // be appended in the results cache. The result parameter is used as a template that will be copied for
+    // each result extracted from the entry.
+    // The given domain will be added as the qname attribute of the result.
+    // The qtype parameter is used to filter extracted results.
+    void extract_entry_results( const DNSName& domain, const DNSResult& result, QType qtype );
+
+  public:
+
+    LdapBackend( const string &suffix="" );
+    ~LdapBackend();
+
+    // Native backend
+    bool list( const DNSName& target, int domain_id, bool include_disabled=false ) override;
+    void lookup( const QType& qtype, const DNSName& qdomain, DNSPacket* p = 0, int zoneid = -1 ) override;
+    bool get( DNSResourceRecord& rr ) override;
+
+    bool getDomainInfo( const DNSName& domain, DomainInfo& di, bool getSerial=true ) override;
+
+    // Master backend
+    void getUpdatedMasters( vector<DomainInfo>* domains ) override;
+    void setNotified( uint32_t id, uint32_t serial ) override;
 };
 
 #endif /* LDAPBACKEND_HH */

@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
 set -e
-set -x
+if [ "${PDNS_DEBUG}" = "YES" ]; then
+  set -x
+fi
 
 export PDNS=${PDNS:-${PWD}/../pdns/pdns_server}
 export PDNS2=${PDNS2:-${PWD}/../pdns/pdns_server}
-export PDNSRECURSOR=${PDNSRECURSOR:-${PWD}/../pdns_recursor}
+export PDNSRECURSOR=${PDNSRECURSOR:-${PWD}/../pdns/recursordist/pdns_recursor}
+export RECCONTROL=${RECCONTROL:-${PWD}/../pdns/recursordist/rec_control}
 export SDIG=${SDIG:-${PWD}/../pdns/sdig}
+export NOTIFY=${NOTIFY:-${PWD}/../pdns/pdns_notify}
 export NSEC3DIG=${NSEC3DIG:-${PWD}/../pdns/nsec3dig}
 export SAXFR=${SAXFR:-${PWD}/../pdns/saxfr}
 export ZONE2SQL=${ZONE2SQL:-${PWD}/../pdns/zone2sql}
-export PDNSSEC=${PDNSSEC:-${PWD}/../pdns/pdnssec}
+export ZONE2LDAP=${ZONE2LDAP:-${PWD}/../pdns/zone2ldap}
+export PDNSUTIL=${PDNSUTIL:-${PWD}/../pdns/pdnsutil}
 export PDNSCONTROL=${PDNSCONTROL:-${PWD}/../pdns/pdns_control}
+export RESOLVERIP=${RESOLVERIP:-8.8.8.8}
 
 
 ALGORITHM=${ALGORITHM:="hmac-md5"}
@@ -23,13 +29,7 @@ export KEY
 
 trap "kill_process 2" EXIT INT TERM
 
-tosql ()
-{
-	if echo $ZONE2SQL | grep -q '../pdns'; then
-		${MAKE} -C ../pdns zone2sql > /dev/null
-	fi
-	$ZONE2SQL --transactions --$1 --named-conf=./named.conf
-}
+source ../regression-tests/common
 
 bindwait ()
 {
@@ -71,13 +71,11 @@ securezone ()
 	fi
 	if [ "${zone: 0:16}" = "secure-delegated" ]
 	then
-		$PDNSSEC --config-dir=. $configname import-zone-key $zone $zone.private ksk 2>&1
-		$PDNSSEC --config-dir=. $configname add-zone-key $zone 1024 zsk 2>&1
-		keyid=`$PDNSSEC --config-dir=. $configname show-zone $zone | grep ZSK | cut -d' ' -f3`
-		$PDNSSEC --config-dir=. $configname activate-zone-key $zone $keyid 2>&1
-		$PDNSSEC --config-dir=. $configname rectify-zone $zone 2>&1
-		$PDNSSEC --config-dir=. $configname set-publish-cds $zone 2>&1
-		$PDNSSEC --config-dir=. $configname set-publish-cdnskey $zone 2>&1
+		$PDNSUTIL --config-dir=. $configname import-zone-key $zone $zone.private ksk 2>&1
+		$PDNSUTIL --config-dir=. $configname add-zone-key $zone rsasha256 1024 zsk active 2>&1
+		$PDNSUTIL --config-dir=. $configname rectify-zone $zone 2>&1
+		$PDNSUTIL --config-dir=. $configname set-publish-cds $zone 2>&1
+		$PDNSUTIL --config-dir=. $configname set-publish-cdnskey $zone 2>&1
 	else
 		# check if PKCS#11 should be used
 		if [ "$pkcs11" -eq 1 ]; then
@@ -86,42 +84,18 @@ securezone ()
                   else
                     slot=$((slot+1))
                   fi
-                  sudo softhsm --init-token --slot $slot --label label$slot --pin 123$slot --so-pin 123$slot 
-                  kid=`$PDNSSEC --config-dir=. $configname hsm assign $zone rsasha256 ksk softhsm $slot 123$slot label$slot 2>&1 | grep softhsm | awk '{ print $NF }'` 
-# keep this until #1413 is merged
-                  kid=`$PDNSSEC --config-dir=. $configname show-zone $zone | grep 'ID =.*KSK' | awk '{ print $3 }'`
-                  $PDNSSEC --config-dir=. $configname hsm create-key $zone $kid
-                  slot=$((slot+1))
                   sudo softhsm --init-token --slot $slot --label label$slot --pin 123$slot --so-pin 123$slot
-                  kid=`$PDNSSEC --config-dir=. $configname hsm assign $zone rsasha256 zsk softhsm $slot 123$slot label$slot 2>&1 | grep softhsm | awk '{ print $NF }'`
-                  kid=`$PDNSSEC --config-dir=. $configname show-zone $zone | grep 'ID =.*ZSK' | awk '{ print $3 }'`
-                  $PDNSSEC --config-dir=. $configname hsm create-key $zone $kid
+                  kid=`$PDNSUTIL --config-dir=. $configname hsm assign $zone ecdsa256 zsk softhsm label$slot 123$slot label$slot 2>&1 | grep softhsm | awk '{ print $NF }'`
+                  kid=`$PDNSUTIL --config-dir=. $configname show-zone $zone | grep 'ID =.*ZSK' | awk '{ print $3 }'`
+                  $PDNSUTIL --config-dir=. $configname hsm create-key $zone $kid
                 else
-                  $PDNSSEC --config-dir=. $configname secure-zone $zone 2>&1
+                  $PDNSUTIL --config-dir=. $configname secure-zone $zone 2>&1
+                  if [ "${zone: 0:20}" = "cdnskey-cds-test.com" ]; then
+                    $PDNSUTIL --config-dir=. $configname set-publish-cds $zone 2>&1
+                    $PDNSUTIL --config-dir=. $configname set-publish-cdnskey $zone 2>&1
+                  fi
                 fi
 	fi
-}
-
-check_process ()
-{
-	set +e
-	loopcount=0
-	while [ $loopcount -lt 5 ]; do
-		sleep 1
-		pids=$(cat pdns*.pid 2>/dev/null)
-		if [ ! -z "$pids" ]
-		then
-			kill -0 $pids >/dev/null 2>&1
-			if [ $? -eq 0 ]
-			then
-				set -e
-				return
-			fi
-		fi
-	let loopcount=loopcount+1
-	done
-	echo "PowerDNS did not start"
-	exit
 }
 
 kill_process ()
@@ -178,6 +152,7 @@ then
 	exit
 fi
 
+address="${PDNS_LISTEN_ADDR:-127.0.0.1}"
 port=$1
 [ -z "$port" ] && port=5300
 context=$2
@@ -199,11 +174,14 @@ Usage: ./start-test-stop <port> [<context>] [wait|nowait] [<cachettl>] [<specifi
 
 context is one of:
 bind bind-dnssec bind-dnssec-nsec3 bind-dnssec-nsec3-optout bind-dnssec-nsec3-narrow
-geoipbackend geoipbackend-nsec3-narrow
+geoip geoip-nsec3-narrow
 gmysql-nodnssec gmysql gmysql-nsec3 gmysql-nsec3-optout gmysql-nsec3-narrow
+godbc_mssql-nodnssec godbc_mssql godbc_mssql-nsec3 godbc_mssql-nsec3-optout godbc_mssql-nsec3-narrow
 goracle-nodnssec goracle goracle-nsec3 goracle-nsec3-optout goracle-nsec3-narrow
+godbc_sqlite3-nodnssec godbc_sqlite3 godbc_sqlite3-nsec3 godbc_sqlite3-nsec3-optout godbc_sqlite3-narrow
 gpgsql-nodnssec gpgsql gpgsql-nsec3 gpgsql-nsec3-optout gpgsql-nsec3-narrow
 gsqlite3-nodnssec gsqlite3 gsqlite3-nsec3 gsqlite3-nsec3-optout gsqlite3-nsec3-narrow
+lmdb-nodnssec lmdb
 mydns
 opendbx-sqlite3
 oracle-nodnssec oracle oracle-nsec3
@@ -212,7 +190,8 @@ remotebackend-pipe-dnssec remotebackend-unix-dnssec remotebackend-http-dnssec re
 #remotebackend-pipe-nsec3 remotebackend-unix-nsec3 remotebackend-http-nsec3
 #remotebackend-pipe-nsec3-narrow remotebackend-unix-nsec3-narrow remotebackend-http-nsec3-narrow
 tinydns
-cassandra
+ldap-tree ldap-simple ldap-strict
+lua2 lua2-dnssec lua2-nsec3 lua2-nsec3-narrow
 #ext-nsd ext-nsd-nsec ext-nsd-nsec3 ext-bind ext-bind-nsec ext-bind-nsec3
 
 * Add -presigned to any ext-nsd, ext-bind, bind, gmysql or gsqlite3 test (except narrow)
@@ -232,8 +211,8 @@ __EOF__
 	exit
 fi
 
-for prog in $SDIG $SAXFR $NSEC3DIG; do
-  if `echo $prog | grep -q '../pdns'`; then
+for prog in $SDIG $SAXFR $NOTIFY $NSEC3DIG; do
+  if `echo $prog | grep -q '\.\./pdns'`; then
     ${MAKE} -C ../pdns ${prog##*../pdns/} || exit
   fi
 done
@@ -249,6 +228,7 @@ done
 
 rm -f pdns*.pid
 rm -f *_tests
+rm -f pdns-*.conf
 
 presigned=no
 both=no
@@ -287,7 +267,7 @@ then
 fi
 
 # check for lua
-if grep -q "^#define HAVE_LUA 1" ../config.h
+if $PDNS --version 2>&1 | grep Features: | grep -q "lua"
 then
   lua_prequery="--lua-prequery-script=./check_stest_source"
   skiplua=0
@@ -311,6 +291,8 @@ dotests () {
 	./toxml
 	./totar
 
+	cat ./trustedkeys
+
 	if [ -s "./failed_tests" ]
 	then
 		for t in `cat failed_tests`
@@ -329,6 +311,7 @@ dotests () {
 
 RETVAL=0
 
+export address
 export port
 export context
 export extracontexts

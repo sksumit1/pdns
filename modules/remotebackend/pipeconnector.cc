@@ -1,21 +1,40 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include <sys/types.h>
-#include <sys/wait.h>
 #include "remotebackend.hh"
 
-PipeConnector::PipeConnector(std::map<std::string,std::string> options) {
-  if (options.count("command") == 0) {
-    L<<Logger::Error<<"Cannot find 'command' option in connection string"<<endl;
+PipeConnector::PipeConnector(std::map<std::string,std::string> optionsMap) {
+  if (optionsMap.count("command") == 0) {
+    g_log<<Logger::Error<<"Cannot find 'command' option in connection string"<<endl;
     throw PDNSException();
   }
-  this->command = options.find("command")->second;
-  this->options = options;
+  this->command = optionsMap.find("command")->second;
+  this->options = optionsMap;
   d_timeout=2000;
 
-  if (options.find("timeout") != options.end()) {
-     d_timeout = boost::lexical_cast<int>(options.find("timeout")->second);
+  if (optionsMap.find("timeout") != optionsMap.end()) {
+     d_timeout = std::stoi(optionsMap.find("timeout")->second);
   }
 
   d_pid = -1;
@@ -45,7 +64,7 @@ void PipeConnector::launch() {
   std::vector <std::string> v;
   split(v, command, is_any_of(" "));
 
-  const char *argv[v.size()+1];
+  std::vector<const char *>argv(v.size()+1);
   argv[v.size()]=0;
 
   for (size_t n = 0; n < v.size(); n++)
@@ -88,37 +107,29 @@ void PipeConnector::launch() {
 
     // stdin & stdout are now connected, fire up our coprocess!
 
-    if(execv(argv[0], const_cast<char * const *>(argv))<0) // now what
+    if(execv(argv[0], const_cast<char * const *>(argv.data()))<0) // now what
       exit(123);
 
     /* not a lot we can do here. We shouldn't return because that will leave a forked process around.
        no way to log this either - only thing we can do is make sure that our parent catches this soonest! */
   }
 
-  rapidjson::Value val;
-  rapidjson::Document init,res;
-  init.SetObject();
-  val = "initialize";
+  Json::array parameters;
+  Json msg = Json(Json::object{
+    { "method", "initialize" },
+    { "parameters", Json(options) },
+  });
 
-  init.AddMember("method",val, init.GetAllocator());
-  val.SetObject();
-  init.AddMember("parameters", val, init.GetAllocator());
-
-  for(std::map<std::string,std::string>::iterator i = options.begin(); i != options.end(); i++) {
-    val = i->second.c_str();
-    init["parameters"].AddMember(i->first.c_str(), val, init.GetAllocator());
-  }
-
-  this->send(init);
-  if (this->recv(res)==false) {
-    L<<Logger::Error<<"Failed to initialize coprocess"<<std::endl;
+  this->send(msg);
+  msg = nullptr;
+  if (this->recv(msg)==false) {
+    g_log<<Logger::Error<<"Failed to initialize coprocess"<<std::endl;
   }
 }
 
-int PipeConnector::send_message(const rapidjson::Document &input)
+int PipeConnector::send_message(const Json& input)
 {
-   std::string line;
-   line = makeStringFromDocument(input);
+   auto line = input.dump();
    launch();
 
    line.append(1,'\n');
@@ -137,11 +148,10 @@ int PipeConnector::send_message(const rapidjson::Document &input)
    return sent;
 }
 
-int PipeConnector::recv_message(rapidjson::Document &output) 
+int PipeConnector::recv_message(Json& output)
 {
    std::string receive;
-   rapidjson::GenericReader<rapidjson::UTF8<> , rapidjson::MemoryPoolAllocator<> > r;
-   std::string tmp;
+   std::string err;
    std::string s_output;
    launch();
 
@@ -165,10 +175,9 @@ int PipeConnector::recv_message(rapidjson::Document &output)
        throw PDNSException("Child closed pipe");
   
       s_output.append(receive);
-      rapidjson::StringStream ss(s_output.c_str());
-      output.ParseStream<0>(ss); 
-      if (output.HasParseError() == false)
-        return s_output.size();
+      // see if it can be parsed
+      output = Json::parse(s_output, err);
+      if (output != nullptr) return s_output.size();
    }
    return 0;
 }
@@ -181,8 +190,8 @@ bool PipeConnector::checkStatus()
     throw PDNSException("Unable to ascertain status of coprocess "+itoa(d_pid)+" from "+itoa(getpid())+": "+string(strerror(errno)));
   else if(ret) {
     if(WIFEXITED(status)) {
-      int ret=WEXITSTATUS(status);
-      throw PDNSException("Coprocess exited with code "+itoa(ret));
+      int exitStatus=WEXITSTATUS(status);
+      throw PDNSException("Coprocess exited with code "+itoa(exitStatus));
     }
     if(WIFSIGNALED(status)) {
       int sig=WTERMSIG(status);

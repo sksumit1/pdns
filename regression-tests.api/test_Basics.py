@@ -7,7 +7,7 @@ from test_helper import ApiTestCase
 class TestBasics(ApiTestCase):
 
     def test_unauth(self):
-        r = requests.get(self.url("/servers/localhost"))
+        r = requests.get(self.url("/api/v1/servers/localhost"))
         self.assertEquals(r.status_code, requests.codes.unauthorized)
 
     def test_split_request(self):
@@ -20,20 +20,20 @@ class TestBasics(ApiTestCase):
         print("Sending request")
         for part in parts:
             print("Sending %s" % part)
-            s.sendall(part)
+            s.sendall(part.encode('ascii'))
             time.sleep(0.5)
 
         resp = s.recv(4096, socket.MSG_WAITALL)
         s.close()
 
-        print "response", repr(resp)
+        print("response", repr(resp))
 
         status = resp.splitlines(0)[0]
-        if '400' in status:
+        if b'400' in status:
             raise Exception('Got unwanted response: %s' % status)
 
     def test_cors(self):
-        r = self.session.options(self.url("/servers/localhost"))
+        r = self.session.options(self.url("/api/v1/servers/localhost"))
         # look for CORS headers
 
         self.assertEquals(r.status_code, requests.codes.ok)
@@ -41,4 +41,4 @@ class TestBasics(ApiTestCase):
         self.assertEquals(r.headers['access-control-allow-headers'], 'Content-Type, X-API-Key')
         self.assertEquals(r.headers['access-control-allow-methods'], 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
 
-        print "response", repr(r.headers)
+        print("response", repr(r.headers))

@@ -1,3 +1,24 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -56,10 +77,8 @@ struct SendReceive
   
   boost::array<double, 11> d_probs;
   
-  SendReceive(const std::string& remoteAddr, uint16_t port)  
+  SendReceive(const std::string& remoteAddr, uint16_t port) : d_probs({{0.001,0.01, 0.025, 0.1, 0.25,0.5,0.75,0.9,0.975, 0.99,0.9999}})
   {
-    boost::array<double, 11> tmp ={{0.001,0.01, 0.025, 0.1, 0.25,0.5,0.75,0.9,0.975, 0.99,0.9999}};
-    d_probs = tmp;
     d_acc = new acc_t(boost::accumulators::tag::extended_p_square::probabilities=d_probs);
     // 
     //d_acc = acc_t
@@ -121,9 +140,9 @@ struct SendReceive
       }
       // parse packet, set 'id', fill out 'ip' 
       
-      MOADNSParser mdp(string(buf, len));
+      MOADNSParser mdp(false, string(buf, len));
       if(!g_quiet) {
-        cout<<"Reply to question for qname='"<<mdp.d_qname.toString()<<"', qtype="<<DNSRecordContent::NumberToType(mdp.d_qtype)<<endl;
+        cout<<"Reply to question for qname='"<<mdp.d_qname<<"', qtype="<<DNSRecordContent::NumberToType(mdp.d_qtype)<<endl;
         cout<<"Rcode: "<<mdp.d_header.rcode<<", RD: "<<mdp.d_header.rd<<", QR: "<<mdp.d_header.qr;
         cout<<", TC: "<<mdp.d_header.tc<<", AA: "<<mdp.d_header.aa<<", opcode: "<<mdp.d_header.opcode<<endl;
       }
@@ -136,7 +155,7 @@ struct SendReceive
         }
         if(!g_quiet)
         {
-          cout<<i->first.d_place-1<<"\t"<<i->first.d_name.toString()<<"\tIN\t"<<DNSRecordContent::NumberToType(i->first.d_type);
+          cout<<i->first.d_place-1<<"\t"<<i->first.d_name<<"\tIN\t"<<DNSRecordContent::NumberToType(i->first.d_type);
           cout<<"\t"<<i->first.d_ttl<<"\t"<< i->first.d_content->getZoneRepresentation()<<"\n";
         }
       }
@@ -164,7 +183,7 @@ struct SendReceive
   //    cerr<<"Slow: "<<domain<<" ("<<usec/1000.0<<" msec)\n";
     if(!g_quiet) {
       cout<<domain.name<<"|"<<DNSRecordContent::NumberToType(domain.type)<<": ("<<usec/1000.0<<"msec) rcode: "<<dr.rcode;
-      BOOST_FOREACH(const ComboAddress& ca, dr.ips) {
+      for(const ComboAddress& ca :  dr.ips) {
         cout<<", "<<ca.toString();
       }
       cout<<endl;
@@ -188,7 +207,13 @@ struct SendReceive
   unsigned int d_receiveds, d_receiveerrors, d_senderrors;
 };
 
+void usage(po::options_description &desc) {
+  cerr << "Usage: dnsbulktest [OPTION].. IPADDRESS PORTNUMBER [LIMIT]"<<endl;
+  cerr << desc << "\n";
+}
+
 int main(int argc, char** argv)
+try
 {
   po::options_description desc("Allowed options");
   desc.add_options()
@@ -196,6 +221,8 @@ int main(int argc, char** argv)
     ("quiet,q", "be quiet about individual queries")
     ("type,t",  po::value<string>()->default_value("A"), "What type to query for")
     ("envoutput,e", "write report in shell environment format")
+    ("version", "show the version number")
+    ("www", po::value<bool>()->default_value("true"), "duplicate all queries with an additional 'www.' in front")
   ;
 
   po::options_description alloptions;
@@ -215,18 +242,22 @@ int main(int argc, char** argv)
   po::notify(g_vm);
 
   if (g_vm.count("help")) {
-    cerr << "Usage: dnsbulktest [--options] ip-address portnumber [limit]"<<endl;
-    cerr << desc << "\n";
+    usage(desc);
     return EXIT_SUCCESS;
   }
-  
+
+  if (g_vm.count("version")) {
+    cerr<<"dnsbulktest "<<VERSION<<endl;
+    return EXIT_SUCCESS;
+  }
+
   if(!g_vm.count("portnumber")) {
     cerr<<"Fatal, need to specify ip-address and portnumber"<<endl;
-    cerr << "Usage: dnsbulktest [--options] ip-address portnumber [limit]"<<endl;
-    cerr << desc << "\n";
+    usage(desc);
     return EXIT_FAILURE;
   }
 
+  bool doWww = g_vm["www"].as<bool>();
   g_quiet = g_vm.count("quiet") > 0;
   g_envoutput = g_vm.count("envoutput") > 0;
   uint16_t qtype;
@@ -272,7 +303,8 @@ int main(int argc, char** argv)
       continue; // this was an IP address
     }
     domains.push_back(TypedQuery(split.second, qtype));
-    domains.push_back(TypedQuery("www."+split.second, qtype));
+    if(doWww)
+      domains.push_back(TypedQuery("www."+split.second, qtype));
   }
   cerr<<"Read "<<domains.size()<<" domains!"<<endl;
   random_shuffle(domains.begin(), domains.end());
@@ -320,9 +352,19 @@ int main(int argc, char** argv)
     cout<<"DBT_QUEUED="<<domains.size()<<endl;
     cout<<"DBT_SENDERRORS="<<sr.d_senderrors<<endl;
     cout<<"DBT_RECEIVED="<<sr.d_receiveds<<endl;
+    cout<<"DBT_NXDOMAINS="<<sr.d_nxdomains<<endl;
+    cout<<"DBT_NODATAS="<<sr.d_nodatas<<endl;
+    cout<<"DBT_UNKNOWNS="<<sr.d_unknowns<<endl;
+    cout<<"DBT_OKS="<<sr.d_oks<<endl;
+    cout<<"DBT_ERRORS="<<sr.d_errors<<endl;
     cout<<"DBT_TIMEOUTS="<<inflighter.getTimeouts()<<endl;
     cout<<"DBT_UNEXPECTEDS="<<inflighter.getUnexpecteds()<<endl;
     cout<<"DBT_OKPERCENTAGE="<<((float)sr.d_oks/domains.size()*100)<<endl;
     cout<<"DBT_OKPERCENTAGEINT="<<(int)((float)sr.d_oks/domains.size()*100)<<endl;
   }
+}
+catch(PDNSException& pe)
+{
+  cerr<<"Fatal error: "<<pe.reason<<endl;
+  exit(EXIT_FAILURE);
 }

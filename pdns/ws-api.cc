@@ -1,27 +1,28 @@
 /*
-    Copyright (C) 2002 - 2014  PowerDNS.COM BV
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2
-    as published by the Free Software Foundation
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include <boost/foreach.hpp>
+
 #include <boost/tokenizer.hpp>
 #include <boost/circular_buffer.hpp>
 #include "namespaces.hh"
@@ -29,13 +30,24 @@
 #include "json.hh"
 #include "version.hh"
 #include "arguments.hh"
+#include "dnsparser.hh"
+#include "responsestats.hh"
+#ifndef RECURSOR
+#include "statbag.hh"
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
 #include <sys/types.h>
 #include <iomanip>
 
+using json11::Json;
+
 extern string s_programname;
+extern ResponseStats g_rs;
+#ifndef RECURSOR
+extern StatBag S;
+#endif
 
 #ifndef HAVE_STRCASESTR
 
@@ -78,31 +90,39 @@ strcasestr(const char *s1, const char *s2)
 
 #endif // HAVE_STRCASESTR
 
-using namespace rapidjson;
+static Json getServerDetail() {
+  return Json::object {
+    { "type", "Server" },
+    { "id", "localhost" },
+    { "url", "/api/v1/servers/localhost" },
+    { "daemon_type", productTypeApiType() },
+    { "version", getPDNSVersion() },
+    { "config_url", "/api/v1/servers/localhost/config{/config_setting}" },
+    { "zones_url", "/api/v1/servers/localhost/zones{/zone}" }
+  };
+}
 
-static void fillServerDetail(Value& out, Value::AllocatorType& allocator)
-{
-  Value jdaemonType(productTypeApiType().c_str(), allocator);
-  out.SetObject();
-  out.AddMember("type", "Server", allocator);
-  out.AddMember("id", "localhost", allocator);
-  out.AddMember("url", "/servers/localhost", allocator);
-  out.AddMember("daemon_type", jdaemonType, allocator);
-  Value jversion(getPDNSVersion().c_str(), allocator);
-  out.AddMember("version", jversion, allocator);
-  out.AddMember("config_url", "/servers/localhost/config{/config_setting}", allocator);
-  out.AddMember("zones_url", "/servers/localhost/zones{/zone}", allocator);
+/* Return information about the supported API versions.
+ * The format of this MUST NEVER CHANGE at it's not versioned.
+ */
+void apiDiscovery(HttpRequest* req, HttpResponse* resp) {
+  if(req->method != "GET")
+    throw HttpMethodNotAllowedException();
+
+  Json version1 = Json::object {
+    { "version", 1 },
+    { "url", "/api/v1" }
+  };
+  Json doc = Json::array { version1 };
+
+  resp->setBody(doc);
 }
 
 void apiServer(HttpRequest* req, HttpResponse* resp) {
   if(req->method != "GET")
     throw HttpMethodNotAllowedException();
 
-  Document doc;
-  doc.SetArray();
-  Value server;
-  fillServerDetail(server, doc.GetAllocator());
-  doc.PushBack(server, doc.GetAllocator());
+  Json doc = Json::array {getServerDetail()};
   resp->setBody(doc);
 }
 
@@ -110,9 +130,7 @@ void apiServerDetail(HttpRequest* req, HttpResponse* resp) {
   if(req->method != "GET")
     throw HttpMethodNotAllowedException();
 
-  Document doc;
-  fillServerDetail(doc, doc.GetAllocator());
-  resp->setBody(doc);
+  resp->setBody(getServerDetail());
 }
 
 void apiServerConfig(HttpRequest* req, HttpResponse* resp) {
@@ -121,104 +139,114 @@ void apiServerConfig(HttpRequest* req, HttpResponse* resp) {
 
   vector<string> items = ::arg().list();
   string value;
-  Document doc;
-  doc.SetArray();
-  BOOST_FOREACH(const string& item, items) {
-    Value jitem;
-    jitem.SetObject();
-    jitem.AddMember("type", "ConfigSetting", doc.GetAllocator());
-
-    Value jname(item.c_str(), doc.GetAllocator());
-    jitem.AddMember("name", jname, doc.GetAllocator());
-
-    if(item.find("password") != string::npos)
+  Json::array doc;
+  for(const string& item : items) {
+    if(item.find("password") != string::npos || item.find("api-key") != string::npos)
       value = "***";
     else
       value = ::arg()[item];
 
-    Value jvalue(value.c_str(), doc.GetAllocator());
-    jitem.AddMember("value", jvalue, doc.GetAllocator());
-
-    doc.PushBack(jitem, doc.GetAllocator());
+    doc.push_back(Json::object {
+      { "type", "ConfigSetting" },
+      { "name", item },
+      { "value", value },
+    });
   }
   resp->setBody(doc);
-}
-
-static string logGrep(const string& q, const string& fname, const string& prefix)
-{
-  FILE* ptr = fopen(fname.c_str(), "r");
-  if(!ptr) {
-    throw ApiException("Opening \"" + fname + "\" failed: " + stringerror());
-  }
-  std::shared_ptr<FILE> fp(ptr, fclose);
-
-  string line;
-  string needle = q;
-  trim_right(needle);
-
-  boost::replace_all(needle, "%20", " ");
-  boost::replace_all(needle, "%22", "\"");
-
-  boost::tokenizer<boost::escaped_list_separator<char> > t(needle, boost::escaped_list_separator<char>("\\", " ", "\""));
-  vector<string> matches(t.begin(), t.end());
-  matches.push_back(prefix);
-
-  boost::circular_buffer<string> lines(200);
-  while(stringfgets(fp.get(), line)) {
-    vector<string>::const_iterator iter;
-    for(iter = matches.begin(); iter != matches.end(); ++iter) {
-      if(!strcasestr(line.c_str(), iter->c_str()))
-        break;
-    }
-    if(iter == matches.end()) {
-      trim_right(line);
-      lines.push_front(line);
-    }
-  }
-
-  Document doc;
-  doc.SetArray();
-  if(!lines.empty()) {
-    BOOST_FOREACH(const string& line, lines) {
-      doc.PushBack(line.c_str(), doc.GetAllocator());
-    }
-  }
-  return makeStringFromDocument(doc);
-}
-
-void apiServerSearchLog(HttpRequest* req, HttpResponse* resp) {
-  if(req->method != "GET")
-    throw HttpMethodNotAllowedException();
-
-  string prefix = " " + s_programname + "[";
-  resp->body = logGrep(req->getvars["q"], ::arg()["experimental-logfile"], prefix);
 }
 
 void apiServerStatistics(HttpRequest* req, HttpResponse* resp) {
   if(req->method != "GET")
     throw HttpMethodNotAllowedException();
 
-  map<string,string> items;
-  productServerStatisticsFetch(items);
+  typedef map<string, string> stat_items_t;
+  stat_items_t general_stats;
+  productServerStatisticsFetch(general_stats);
 
-  Document doc;
-  doc.SetArray();
-  typedef map<string, string> items_t;
-  BOOST_FOREACH(const items_t::value_type& item, items) {
-    Value jitem;
-    jitem.SetObject();
-    jitem.AddMember("type", "StatisticItem", doc.GetAllocator());
+  auto resp_qtype_stats = g_rs.getQTypeResponseCounts();
+  auto resp_size_stats = g_rs.getSizeResponseCounts();
 
-    Value jname(item.first.c_str(), doc.GetAllocator());
-    jitem.AddMember("name", jname, doc.GetAllocator());
-
-    Value jvalue(item.second.c_str(), doc.GetAllocator());
-    jitem.AddMember("value", jvalue, doc.GetAllocator());
-
-    doc.PushBack(jitem, doc.GetAllocator());
+  Json::array doc;
+  for(const auto& item : general_stats) {
+    doc.push_back(Json::object {
+      { "type", "StatisticItem" },
+      { "name", item.first },
+      { "value", item.second },
+    });
   }
 
+  {
+    Json::array values;
+    for(const auto& item : resp_qtype_stats) {
+      if (item.second == 0)
+        continue;
+      values.push_back(Json::object {
+        { "name", DNSRecordContent::NumberToType(item.first) },
+        { "value", std::to_string(item.second) },
+      });
+    }
+
+    doc.push_back(Json::object {
+      { "type", "MapStatisticItem" },
+      { "name", "queries-by-qtype" },
+      { "value", values },
+    });
+  }
+
+  {
+    Json::array values;
+    for(const auto& item : resp_size_stats) {
+      if (item.second == 0)
+        continue;
+
+      values.push_back(Json::object {
+        { "name", std::to_string(item.first) },
+        { "value", std::to_string(item.second) },
+      });
+    }
+
+    doc.push_back(Json::object {
+      { "type", "MapStatisticItem" },
+      { "name", "response-sizes" },
+      { "value", values },
+    });
+  }
+
+#ifndef RECURSOR
+  for(const auto& ringName : S.listRings()) {
+    Json::array values;
+    const auto& ring = S.getRing(ringName);
+    for(const auto& item : ring) {
+      if (item.second == 0)
+        continue;
+
+      values.push_back(Json::object {
+        { "name", item.first },
+        { "value", std::to_string(item.second) },
+      });
+    }
+
+    doc.push_back(Json::object {
+      { "type", "RingStatisticItem" },
+      { "name", ringName },
+      { "size", std::to_string(S.getRingSize(ringName)) },
+      { "value", values },
+    });
+  }
+#endif
+
   resp->setBody(doc);
+}
+
+DNSName apiNameToDNSName(const string& name) {
+  if (!isCanonical(name)) {
+    throw ApiException("DNS Name '" + name + "' is not canonical");
+  }
+  try {
+    return DNSName(name);
+  } catch (...) {
+    throw ApiException("Unable to parse DNS Name '" + name + "'");
+  }
 }
 
 DNSName apiZoneIdToName(const string& id) {
@@ -261,7 +289,11 @@ DNSName apiZoneIdToName(const string& id) {
 
   zonename = ss.str();
 
-  return DNSName(zonename);
+  try {
+    return DNSName(zonename);
+  } catch (...) {
+    throw ApiException("Unable to parse DNS Name '" + zonename + "'");
+  }
 }
 
 string apiZoneNameToId(const DNSName& dname) {
@@ -292,4 +324,14 @@ string apiZoneNameToId(const DNSName& dname) {
     id = (boost::format("=%02X") % (int)('.')).str();
   }
   return id;
+}
+
+void apiCheckNameAllowedCharacters(const string& name) {
+  if (name.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01234567890_/.-") != std::string::npos)
+    throw ApiException("Name '"+name+"' contains unsupported characters");
+}
+
+void apiCheckQNameAllowedCharacters(const string& qname) {
+  if (qname.compare(0, 2, "*.") == 0) apiCheckNameAllowedCharacters(qname.substr(2));
+  else apiCheckNameAllowedCharacters(qname);
 }

@@ -1,20 +1,25 @@
 /*
-    Copyright (C) 2011 Fredrik Danerklint
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2 as published
-    by the Free Software Foundation
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
-
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ * originally authored by Fredrik Danerklint
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #define LUABACKEND_EXTERN_F_HH
 
 #ifdef HAVE_CONFIG_H
@@ -30,8 +35,14 @@
 #include <sstream>
 using namespace std;
 
+// It seems we don't want the coroutine standard library so we can't use
+// luaL_openlibs(). FIXME: is the coroutine library really that bad?
 const luaL_Reg lualibs[] = {
+#if LUA_VERSION_NUM < 502
     {"", luaopen_base},
+#else
+    {"_G", luaopen_base},
+#endif
     {LUA_LOADLIBNAME, luaopen_package},
     {LUA_TABLIBNAME, luaopen_table},
     {LUA_IOLIBNAME, luaopen_io},
@@ -39,6 +50,12 @@ const luaL_Reg lualibs[] = {
     {LUA_STRLIBNAME, luaopen_string},
     {LUA_MATHLIBNAME, luaopen_math},
     {LUA_DBLIBNAME, luaopen_debug},
+#if LUA_VERSION_NUM == 502 || defined(LUA_COMPAT_BITLIB)
+    {LUA_BITLIBNAME, luaopen_bit32},
+#endif
+#if LUA_VERSION_NUM == 503
+    {LUA_UTF8LIBNAME, luaopen_utf8},
+#endif
 //    {LUA_COLIBNAME, luaopen_coroutine},
 #ifdef USE_LUAJIT
     {"bit",     luaopen_bit},
@@ -108,22 +125,23 @@ int l_dnspacket (lua_State *lua) {
 	return 1;
     }
 
-    lua_pushstring(lua, lb->dnspacket->getRemote().c_str());
-    lua_pushnumber(lua, lb->dnspacket->getRemotePort());
-    lua_pushstring(lua, lb->dnspacket->getLocal().c_str());
+    lua_pushstring(lua, lb->dnspacket->getRemote().toString().c_str());
+    lua_pushinteger(lua, lb->dnspacket->getRemotePort());
+    lua_pushstring(lua, lb->dnspacket->getLocal().toString().c_str());
+    lua_pushstring(lua, lb->dnspacket->getRealRemote().toString().c_str());
 
-    return 3;
+    return 4;
 }
 
 int l_logger (lua_State *lua) {
 //    assert(lua == lb->lua);
 
-    lua_getfield(lua, LUA_REGISTRYINDEX, "__LUABACKEND");
-    LUABackend* lb = (LUABackend*)lua_touserdata(lua, -1);
-
     int i = lua_gettop(lua);
     if (i < 1)
-	return 0;
+        return 0;
+
+    lua_getfield(lua, LUA_REGISTRYINDEX, "__LUABACKEND");
+    LUABackend* lb = (LUABackend*)lua_touserdata(lua, -1);
 
     int log_level = 0;
     stringstream s;
@@ -140,7 +158,7 @@ int l_logger (lua_State *lua) {
 	space = " ";
     }
 
-    L.log(lb->backend_name + s.str(), (Logger::Urgency) log_level);
+    g_log.log(lb->backend_name + s.str(), (Logger::Urgency) log_level);
 
     return 0;
 }
@@ -150,18 +168,20 @@ void register_lua_functions(lua_State *lua) {
 
     const luaL_Reg *lib = lualibs;
     for (; lib->func; lib++) {
+#if LUA_VERSION_NUM < 502
         lua_pushcfunction(lua, lib->func);
         lua_pushstring(lua, lib->name);
         lua_call(lua, 1, 0);
+#else
+        luaL_requiref(lua, lib->name, lib->func, 1);
+        lua_pop(lua, 1);  /* remove lib */
+#endif
     }
 
     lua_gc(lua, LUA_GCRESTART, 0);
 
     lua_pushinteger(lua, Logger::All);
     lua_setglobal(lua, "log_all");
-
-    lua_pushinteger(lua, Logger::NTLog);
-    lua_setglobal(lua, "log_ntlog");
 
     lua_pushinteger(lua, Logger::Alert);
     lua_setglobal(lua, "log_alert");
@@ -201,10 +221,10 @@ void register_lua_functions(lua_State *lua) {
 
     lua_newtable(lua);
     for(vector<QType::namenum>::const_iterator iter = QType::names.begin(); iter != QType::names.end(); ++iter) {
-	lua_pushnumber(lua, iter->second);
+	lua_pushinteger(lua, iter->second);
 	lua_setfield(lua, -2, iter->first.c_str());
     }
-    lua_pushnumber(lua, 3);
+    lua_pushinteger(lua, 3);
     lua_setfield(lua, -2, "NXDOMAIN");
     lua_setglobal(lua, "QTypes");
 }
@@ -242,7 +262,7 @@ bool LUABackend::getValueFromTable(lua_State *lua, const std::string& key, DNSNa
 }
 
 bool LUABackend::getValueFromTable(lua_State *lua, uint32_t key, string& value) {
-  lua_pushnumber(lua, key);
+  lua_pushinteger(lua, key);
   lua_gettable(lua, -2);
 
   bool ret = false;
@@ -257,6 +277,7 @@ bool LUABackend::getValueFromTable(lua_State *lua, uint32_t key, string& value) 
   return ret;
 }
 
+#if !(defined(__i386__) && defined(__FreeBSD__))
 bool LUABackend::getValueFromTable(lua_State *lua, const std::string& key, time_t& value) {
   lua_pushstring(lua, key.c_str());
   lua_gettable(lua, -2);
@@ -272,6 +293,7 @@ bool LUABackend::getValueFromTable(lua_State *lua, const std::string& key, time_
 
   return ret;
 }
+#endif
 
 bool LUABackend::getValueFromTable(lua_State *lua, const std::string& key, uint32_t& value) {
   lua_pushstring(lua, key.c_str());
@@ -280,7 +302,7 @@ bool LUABackend::getValueFromTable(lua_State *lua, const std::string& key, uint3
   bool ret = false;
 
   if(!lua_isnil(lua, -1)) {
-    value = (uint32_t)lua_tonumber(lua, -1);
+    value = (uint32_t)lua_tointeger(lua, -1);
     ret = true;
   }
 
@@ -296,12 +318,28 @@ bool LUABackend::getValueFromTable(lua_State *lua, const std::string& key, uint1
   bool ret = false;
 
   if(!lua_isnil(lua, -1)) {
-    value = (uint16_t)lua_tonumber(lua, -1);
+    value = (uint16_t)lua_tointeger(lua, -1);
     ret = true;
   }
 
   lua_pop(lua, 1);
 
+  return ret;
+}
+
+bool LUABackend::getValueFromTable(lua_State *lua, const std::string& key, uint8_t& value) {
+  lua_pushstring(lua, key.c_str()); 
+  lua_gettable(lua, -2);  
+
+  bool ret = false;
+  
+  if(!lua_isnil(lua, -1)) {
+    value = (uint8_t)lua_tointeger(lua, -1);
+    ret = true;
+  }
+  
+  lua_pop(lua, 1);
+  
   return ret;
 }
 
@@ -312,7 +350,7 @@ bool LUABackend::getValueFromTable(lua_State *lua, const std::string& key, int& 
   bool ret = false;
 
   if(!lua_isnil(lua, -1)) {
-    value = (int)lua_tonumber(lua, -1);
+    value = (int)lua_tointeger(lua, -1);
     ret = true;
   }
 

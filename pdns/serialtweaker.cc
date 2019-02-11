@@ -26,7 +26,6 @@
 #include "dnsseckeeper.hh"
 #include "dnspacket.hh"
 #include "namespaces.hh"
-#include <boost/foreach.hpp>
 
 uint32_t localtime_format_YYYYMMDDSS(time_t t, uint32_t seq)
 {
@@ -39,108 +38,121 @@ uint32_t localtime_format_YYYYMMDDSS(time_t t, uint32_t seq)
     + seq;
 }
 
-bool editSOA(DNSSECKeeper& dk, const DNSName& qname, DNSPacket* dp)
+uint32_t calculateEditSOA(uint32_t old_serial, const string& kind, const DNSName& zonename)
 {
-  vector<DNSResourceRecord>& rrs = dp->getRRS();
-  BOOST_FOREACH(DNSResourceRecord& rr, rrs) {
-    if(rr.qtype.getCode() == QType::SOA && rr.qname == qname) {
-      string kind;
-      dk.getFromMeta(qname, "SOA-EDIT", kind);
-      return editSOARecord(rr, kind);
-    }
-  }
-  return false;
-}
-
-bool editSOARecord(DNSResourceRecord& rr, const string& kind) {
-  if(kind.empty())
-    return false;
-
-  SOAData sd;
-  fillSOAData(rr.content, sd);
-  sd.serial = calculateEditSOA(sd, kind);
-  rr.content = serializeSOAData(sd);
-  return true;
-}
-
-uint32_t calculateEditSOA(SOAData sd, const string& kind) {
-  if(pdns_iequals(kind,"INCEPTION")) {
-    time_t inception = getStartOfWeek();
-    return localtime_format_YYYYMMDDSS(inception, 1);
-  }
-  else if(pdns_iequals(kind,"INCEPTION-INCREMENT")) {
+  if(pdns_iequals(kind,"INCEPTION-INCREMENT")) {
     time_t inception = getStartOfWeek();
     uint32_t inception_serial = localtime_format_YYYYMMDDSS(inception, 1);
     uint32_t dont_increment_after = localtime_format_YYYYMMDDSS(inception + 2*86400, 99);
 
-    if(sd.serial < inception_serial - 1) { /* less than <inceptionday>00 */
+    if(old_serial < inception_serial - 1) { /* less than <inceptionday>00 */
       return inception_serial; /* return <inceptionday>01   (skipping <inceptionday>00 as possible value) */
-    } else if(sd.serial <= dont_increment_after) { /* >= <inceptionday>00 but <= <inceptionday+2>99 */
-      return (sd.serial + 2); /* "<inceptionday>00" and "<inceptionday>01" are reserved for inception increasing, so increment sd.serial by two */
+    } else if (old_serial < inception_serial+1) {
+      /* "<inceptionday>00" and "<inceptionday>01" are reserved for inception increasing, so jump to "<inceptionday>02" */
+      return inception_serial+1;
+    } else if(old_serial <= dont_increment_after) { /* >= <inceptionday>00 but <= <inceptionday+2>99 */
+      return old_serial + 1;
     }
-  }
-  else if(pdns_iequals(kind,"INCEPTION-WEEK")) {
-    time_t inception = getStartOfWeek();
-    return ( inception / (7*86400) );
   }
   else if(pdns_iequals(kind,"INCREMENT-WEEKS")) {
     time_t inception = getStartOfWeek();
-    return (sd.serial + (inception / (7*86400)));
+    return (old_serial + (inception / (7*86400)));
   }
   else if(pdns_iequals(kind,"EPOCH")) {
     return time(0);
   }
   else if(pdns_iequals(kind,"INCEPTION-EPOCH")) {
     uint32_t inception = getStartOfWeek();
-    if (sd.serial < inception)
+    if (old_serial < inception)
       return inception;
   }
-  return sd.serial;
+  else if(pdns_iequals(kind,"NONE")) {
+    // do nothing to serial. needed because a metadata of "" will use the default-soa-edit setting instead.
+  }
+  else if(!kind.empty()) {
+    g_log<<Logger::Warning<<"SOA-EDIT type '"<<kind<<"' for zone "<<zonename<<" is unknown."<<endl;
+  }
+  // Seen strictly, this is a broken config: we can only come here if
+  // both SOA-EDIT and default-soa-edit are set to "", but the latter
+  // should be set to "NONE" instead.
+  return old_serial;
 }
 
-// Used for SOA-EDIT-DNSUPDATE and SOA-EDIT-API.
-uint32_t calculateIncreaseSOA(SOAData sd, const string& increaseKind, const string& editKind) {
-  // These only work when SOA-EDIT is set, otherwise fall back to default.
-  if (!editKind.empty()) {
-    if (pdns_iequals(increaseKind, "SOA-EDIT-INCREASE")) {
-      uint32_t new_serial = calculateEditSOA(sd, editKind);
-      if (new_serial <= sd.serial) {
-        new_serial = sd.serial + 1;
-      }
-      return new_serial;
-    }
-    else if (pdns_iequals(increaseKind, "SOA-EDIT")) {
-      return calculateEditSOA(sd, editKind);
-    }
-  }
+uint32_t calculateEditSOA(uint32_t old_serial, DNSSECKeeper& dk, const DNSName& zonename) {
+  string kind;
+  dk.getSoaEdit(zonename, kind);
+  return calculateEditSOA(old_serial, kind, zonename);
+}
 
-  if (pdns_iequals(increaseKind, "INCREASE")) {
-    return sd.serial + 1;
+/** Used for SOA-EDIT-DNSUPDATE and SOA-EDIT-API. */
+static uint32_t calculateIncreaseSOA(uint32_t old_serial, const string& increaseKind, const string& editKind, const DNSName& zonename) {
+  if (pdns_iequals(increaseKind, "SOA-EDIT-INCREASE")) {
+    uint32_t new_serial = old_serial;
+    if (!editKind.empty()) {
+      new_serial = calculateEditSOA(old_serial, editKind, zonename);
+    }
+    if (new_serial <= old_serial) {
+      new_serial = old_serial + 1;
+    }
+    return new_serial;
+  }
+  else if (pdns_iequals(increaseKind, "SOA-EDIT")) {
+    return calculateEditSOA(old_serial, editKind, zonename);
+  }
+  else if (pdns_iequals(increaseKind, "INCREASE")) {
+    return old_serial + 1;
   }
   else if (pdns_iequals(increaseKind, "EPOCH")) {
     return time(0);
   }
-
-  // DEFAULT case
-  time_t now = time(0);
-  struct tm tm;
-  localtime_r(&now, &tm);
-  boost::format fmt("%04d%02d%02d%02d");
-  string newdate = (fmt % (tm.tm_year + 1900) % (tm.tm_mon + 1) % tm.tm_mday % 1).str();
-  uint32_t new_serial = atol(newdate.c_str());
-  if (new_serial <= sd.serial) {
-    new_serial = sd.serial + 1;
+  else if (pdns_iequals(increaseKind, "DEFAULT")) {
+    time_t now = time(0);
+    uint32_t new_serial = localtime_format_YYYYMMDDSS(now, 1);
+    if (new_serial <= old_serial) {
+        new_serial = old_serial + 1;
+    }
+    return new_serial;
+  } else if(!increaseKind.empty()) {
+    g_log<<Logger::Warning<<"SOA-EDIT-API/DNSUPDATE type '"<<increaseKind<<"' for zone "<<zonename<<" is unknown."<<endl;
   }
-  return new_serial;
+  return old_serial;
 }
 
+/** Used for SOA-EDIT-DNSUPDATE and SOA-EDIT-API.
+ * Good if you already *have* a DNSResourceRecord.
+ * Content in rr is suitable for writing into a backend.
+ *
+ * @return true if changes may have been made
+ */
 bool increaseSOARecord(DNSResourceRecord& rr, const string& increaseKind, const string& editKind) {
   if (increaseKind.empty())
     return false;
 
   SOAData sd;
   fillSOAData(rr.content, sd);
-  sd.serial = calculateIncreaseSOA(sd, increaseKind, editKind);
-  rr.content = serializeSOAData(sd);
+
+  sd.serial = calculateIncreaseSOA(sd.serial, increaseKind, editKind, rr.qname);
+  rr.content = makeSOAContent(sd)->getZoneRepresentation(true);
+  return true;
+}
+
+/** Used for SOA-EDIT-DNSUPDATE and SOA-EDIT-API.
+ * Makes a mostly reset DNSResourceRecord for you in @param rrout.
+ * Content in rrout is suitable for writing into a backend.
+ *
+ * @return true if rrout is now valid
+ */
+bool makeIncreasedSOARecord(SOAData& sd, const string& increaseKind, const string& editKind, DNSResourceRecord& rrout) {
+  if (increaseKind.empty())
+    return false;
+
+  sd.serial = calculateIncreaseSOA(sd.serial, increaseKind, editKind, sd.qname);
+  rrout.qname = sd.qname;
+  rrout.content = makeSOAContent(sd)->getZoneRepresentation(true);
+  rrout.qtype = QType::SOA;
+  rrout.domain_id = sd.domain_id;
+  rrout.auth = 1;
+  rrout.ttl = sd.ttl;
+
   return true;
 }

@@ -1,24 +1,25 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2002 - 2011  PowerDNS.COM BV
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2
-    as published by the Free Software Foundation
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
 /* accepts a named.conf or a zone as parameter and outputs heaps of sql */
 
 #ifdef HAVE_CONFIG_H
@@ -44,7 +45,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <boost/foreach.hpp>
+
 #include "json11.hpp"
 
 using namespace json11;
@@ -59,7 +60,7 @@ static Json::object emitRecord(const string& zoneName, const DNSName &DNSqname, 
   g_numRecords++;
   string content(ocontent);
   if(qtype == "MX" || qtype == "SRV") { 
-    prio=atoi(content.c_str());
+    prio=pdns_stou(content);
     
     string::size_type pos = content.find_first_not_of("0123456789");
     if(pos != string::npos)
@@ -69,7 +70,7 @@ static Json::object emitRecord(const string& zoneName, const DNSName &DNSqname, 
 
   Json::object dict;
  
-  dict["name"] = DNSqname.toStringNoDot();
+  dict["name"] = DNSqname.toString();
   dict["type"] = qtype;
   dict["ttl"] = ttl;
   dict["prio"] = prio;
@@ -95,9 +96,7 @@ try
   vector<string> lines;
 
     reportAllTypes();
-#if __GNUC__ >= 3
     std::ios_base::sync_with_stdio(false);
-#endif
    
     ::arg().setSwitch("verbose","Verbose comments on operation")="no";
     ::arg().setSwitch("on-error-resume-next","Continue after errors")="no";
@@ -111,6 +110,7 @@ try
     ::arg().set("soa-expire-default","Do not change")="0";
 
     ::arg().setCmd("help","Provide a helpful message");
+    ::arg().setCmd("version","Print the version");
 
     S.declare("logmessages");
 
@@ -118,7 +118,12 @@ try
     string zonefile="";
 
     ::arg().parse(argc, argv);
-  
+
+    if(::arg().mustDo("version")){
+      cerr<<"zone2json "<<VERSION<<endl;
+      exit(0);
+    }
+
     if(::arg().mustDo("help")) {
       cout<<"syntax:"<<endl<<endl;
       cout<<::arg().helpstring()<<endl;
@@ -161,7 +166,7 @@ try
           ++i)
         {
           if(i->type!="master" && i->type!="slave") {
-            cerr<<" Warning! Skipping '"<<i->type<<"' zone '"<<i->name.toString()<<"'"<<endl;
+            cerr<<" Warning! Skipping '"<<i->type<<"' zone '"<<i->name<<"'"<<endl;
             continue;
           }
           lines.clear(); 
@@ -170,10 +175,10 @@ try
             Json::array recs;
             ZoneParserTNG zpt(i->filename, i->name, BP.getDirectory());
             DNSResourceRecord rr;
-            obj["name"] = i->name.toStringNoDot();
+            obj["name"] = i->name.toString();
 
             while(zpt.get(rr)) 
-              recs.push_back(emitRecord(i->name.toStringNoDot(), rr.qname, rr.qtype.getName(), rr.content, rr.ttl));
+              recs.push_back(emitRecord(i->name.toString(), rr.qname, rr.qtype.getName(), rr.content, rr.ttl));
             obj["records"] = recs;
             Json tmp = obj;
             cout<<tmp.dump();

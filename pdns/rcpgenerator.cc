@@ -1,46 +1,53 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2005 - 2011 PowerDNS.COM BV
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2 as 
-    published by the Free Software Foundation
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
-
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 #include "rcpgenerator.hh"
+#include "ascii.hh"
 #include "dnsparser.hh"
 #include "misc.hh"
 #include "utility.hh"
-#include <boost/lexical_cast.hpp>
 #include <boost/algorithm/string.hpp>
+#include <boost/algorithm/string/classification.hpp>
+
 #include <iostream>
 #include "base32.hh"
 #include "base64.hh"
 #include "namespaces.hh"
 
-RecordTextReader::RecordTextReader(const string& str, const string& zone) : d_string(str), d_zone(zone), d_pos(0), d_end(str.size())
+RecordTextReader::RecordTextReader(const string& str, const DNSName& zone) : d_string(str), d_zone(zone), d_pos(0)
 {
+   /* remove whitespace */
+   if(!d_string.empty() && ( dns_isspace(*d_string.begin()) || dns_isspace(*d_string.rbegin()) ))
+     boost::trim_if(d_string, dns_isspace);
+   d_end = d_string.size();
 }
 
 void RecordTextReader::xfr48BitInt(uint64_t &val)
 {
   xfr64BitInt(val);
+  if (val > 281474976710655LL)
+    throw RecordTextException("Overflow reading 48 bit integer from record content"); // fixme improve
 }
 
 void RecordTextReader::xfr64BitInt(uint64_t &val)
@@ -48,13 +55,12 @@ void RecordTextReader::xfr64BitInt(uint64_t &val)
   skipSpaces();
 
   if(!isdigit(d_string.at(d_pos)))
-    throw RecordTextException("expected digits at position "+lexical_cast<string>(d_pos)+" in '"+d_string+"'");
+    throw RecordTextException("expected digits at position "+std::to_string(d_pos)+" in '"+d_string+"'");
 
-  char *endptr;
-  unsigned long ret=strtoull(d_string.c_str() + d_pos, &endptr, 10);
-  val=ret;
+  size_t pos;
+  val=std::stoull(d_string.substr(d_pos), &pos);
   
-  d_pos = endptr - d_string.c_str();
+  d_pos += pos;
 }
 
 
@@ -63,14 +69,12 @@ void RecordTextReader::xfr32BitInt(uint32_t &val)
   skipSpaces();
 
   if(!isdigit(d_string.at(d_pos)))
-    throw RecordTextException("expected digits at position "+lexical_cast<string>(d_pos)+" in '"+d_string+"'");
+    throw RecordTextException("expected digits at position "+std::to_string(d_pos)+" in '"+d_string+"'");
 
-  char *endptr;
-  unsigned long ret=pdns_strtoui(d_string.c_str() + d_pos, &endptr, 10);
-  if (ret == UINT_MAX && errno == ERANGE) throw RecordTextException("serial number too large in '"+d_string+"'");
-  val=ret;
-  
-  d_pos = endptr - d_string.c_str();
+  size_t pos;
+  val=pdns_stou(d_string.c_str()+d_pos, &pos);
+ 
+  d_pos += pos;
 }
 
 void RecordTextReader::xfrTime(uint32_t &val)
@@ -79,7 +83,13 @@ void RecordTextReader::xfrTime(uint32_t &val)
   memset(&tm, 0, sizeof(tm));
   
   uint64_t itmp;
-  xfr64BitInt(itmp); // ends on number, so this works 
+  xfr64BitInt(itmp);
+
+  if (itmp <= (uint32_t)~0) {
+    // formatted as seconds since epoch, not as YYYYMMDDHHmmSS:
+    val = (uint32_t) itmp;
+    return;
+  }
 
   ostringstream tmp;
 
@@ -99,22 +109,27 @@ void RecordTextReader::xfrIP(uint32_t &val)
   skipSpaces();
 
   if(!isdigit(d_string.at(d_pos)))
-    throw RecordTextException("while parsing IP address, expected digits at position "+lexical_cast<string>(d_pos)+" in '"+d_string+"'");
+    throw RecordTextException("while parsing IP address, expected digits at position "+std::to_string(d_pos)+" in '"+d_string+"'");
 
   uint32_t octet=0;
   val=0;
   char count=0;
-  
+  bool last_was_digit = false;
+
   for(;;) {
     if(d_string.at(d_pos)=='.') {
+      if (!last_was_digit)
+        throw RecordTextException(string("unable to parse IP address, dot without previous digit"));
+      last_was_digit = false;
       val<<=8;
       val+=octet;
       octet=0;
       count++;
       if(count > 3)
-        break;
+        throw RecordTextException(string("unable to parse IP address, too many dots"));
     }
     else if(isdigit(d_string.at(d_pos))) {
+      last_was_digit = true;
       octet*=10;
       octet+=d_string.at(d_pos) - '0';
       if(octet > 255)
@@ -129,10 +144,12 @@ void RecordTextReader::xfrIP(uint32_t &val)
     if(d_pos == d_string.length())
       break;
   }
-  if(count<=3) {
-    val<<=8;
-    val+=octet;
-  }
+  if (count != 3)
+    throw RecordTextException(string("unable to parse IP address, not enough dots"));
+  if (!last_was_digit)
+    throw RecordTextException(string("unable to parse IP address, trailing dot"));
+  val<<=8;
+  val+=octet;
   val=ntohl(val);
 }
 
@@ -150,7 +167,7 @@ void RecordTextReader::xfrIP6(std::string &val)
     len++);
 
   if(!len)
-    throw RecordTextException("while parsing IPv6 address, expected xdigits at position "+lexical_cast<string>(d_pos)+" in '"+d_string+"'");
+    throw RecordTextException("while parsing IPv6 address, expected xdigits at position "+std::to_string(d_pos)+" in '"+d_string+"'");
 
   // end of value is here, try parse as IPv6
   string address=d_string.substr(d_pos, len);
@@ -162,6 +179,28 @@ void RecordTextReader::xfrIP6(std::string &val)
   val = std::string((char*)tmpbuf.s6_addr, 16);
 
   d_pos += len;
+}
+
+void RecordTextReader::xfrCAWithoutPort(uint8_t version, ComboAddress &val)
+{
+  if (version == 4) {
+    uint32_t ip;
+    xfrIP(ip);
+    val = makeComboAddressFromRaw(4, string((const char*) &ip, 4));
+  }
+  else if (version == 6) {
+    string ip;
+    xfrIP6(ip);
+    val = makeComboAddressFromRaw(6, ip);
+  }
+  else throw RecordTextException("invalid address family");
+}
+
+void RecordTextReader::xfrCAPort(ComboAddress &val)
+{
+  uint16_t port;
+  xfr16BitInt(port);
+  val.sin4.sin_port = port;
 }
 
 bool RecordTextReader::eof()
@@ -188,11 +227,10 @@ void RecordTextReader::xfr8BitInt(uint8_t &val)
 }
 
 // this code should leave all the escapes around 
-void RecordTextReader::xfrName(DNSName& val, bool) 
+void RecordTextReader::xfrName(DNSName& val, bool, bool)
 {
   skipSpaces();
-  string sval;
-  sval.reserve(d_end - d_pos);
+  DNSName sval;
 
   const char* strptr=d_string.c_str();
   string::size_type begin_pos = d_pos;
@@ -202,19 +240,13 @@ void RecordTextReader::xfrName(DNSName& val, bool)
       
     d_pos++;
   }
-  sval.append(strptr+begin_pos, strptr+d_pos);      
+  sval = DNSName(std::string(strptr+begin_pos, strptr+d_pos));
 
   if(sval.empty())
     sval=d_zone;
-  else if(!d_zone.empty()) {
-    char last=sval[sval.size()-1];
-   
-    if(last =='.')
-      sval.resize(sval.size()-1);
-    else if(last != '.' && !isdigit(last)) // don't add zone to IP address
-      sval+="."+d_zone;
-  }
-  val = DNSName(sval);
+  else if(!d_zone.empty())
+    sval+=d_zone;
+  val = sval;
 }
 
 static bool isbase64(char c, bool acceptspace)
@@ -246,7 +278,7 @@ void RecordTextReader::xfrBlobNoSpaces(string& val, int len) {
   B64Decode(tmp, val);
   
   if (len>-1 && val.size() != static_cast<size_t>(len))
-    throw RecordTextException("Record length "+lexical_cast<string>(val.size()) + " does not match expected length '"+lexical_cast<string>(len));
+    throw RecordTextException("Record length "+std::to_string(val.size()) + " does not match expected length '"+std::to_string(len));
 }
 
 void RecordTextReader::xfrBlob(string& val, int)
@@ -274,7 +306,7 @@ static inline uint8_t hextodec(uint8_t val)
   else if(val >= 'a' && val<='f')
     return 10+(val-'a');
   else
-    throw RecordTextException("Unknown hexadecimal character '"+lexical_cast<string>(val)+"'");
+    throw RecordTextException("Unknown hexadecimal character '"+std::to_string(val)+"'");
 }
 
 
@@ -335,7 +367,7 @@ void RecordTextWriter::xfrBase32HexBlob(const string& val)
 }
 
 
-void RecordTextReader::xfrText(string& val, bool multi)
+void RecordTextReader::xfrText(string& val, bool multi, bool lenField)
 {
   val.clear();
   val.reserve(d_end - d_pos);
@@ -356,7 +388,7 @@ void RecordTextReader::xfrText(string& val, bool multi)
         d_pos = d_end;
         break;
       }
-      throw RecordTextException("Data field in DNS should start with quote (\") at position "+lexical_cast<string>(d_pos)+" of '"+d_string+"'");
+      throw RecordTextException("Data field in DNS should start with quote (\") at position "+std::to_string(d_pos)+" of '"+d_string+"'");
     }
     val.append(1, '"');
     while(++d_pos < d_end && d_string[d_pos]!='"') {
@@ -371,6 +403,21 @@ void RecordTextReader::xfrText(string& val, bool multi)
     d_pos++;
     if(!multi)
       break;
+  }
+}
+
+void RecordTextReader::xfrUnquotedText(string& val, bool lenField)
+{
+  val.clear();
+  val.reserve(d_end - d_pos);
+
+  if(!val.empty())
+    val.append(1, ' ');
+
+  skipSpaces();
+  val.append(1, d_string[d_pos]);
+  while(++d_pos < d_end && d_string[d_pos] != ' '){
+    val.append(1, d_string[d_pos]);
   }
 }
 
@@ -398,16 +445,17 @@ void RecordTextReader::skipSpaces()
 }
 
 
-RecordTextWriter::RecordTextWriter(string& str) : d_string(str)
+RecordTextWriter::RecordTextWriter(string& str, bool noDot) : d_string(str)
 {
   d_string.clear();
+  d_nodot=noDot;
 }
 
 void RecordTextWriter::xfr48BitInt(const uint64_t& val)
 {
   if(!d_string.empty())
     d_string.append(1,' ');
-  d_string+=lexical_cast<string>(val);
+  d_string+=std::to_string(val);
 }
 
 
@@ -415,7 +463,7 @@ void RecordTextWriter::xfr32BitInt(const uint32_t& val)
 {
   if(!d_string.empty())
     d_string.append(1,' ');
-  d_string+=lexical_cast<string>(val);
+  d_string+=std::to_string(val);
 }
 
 void RecordTextWriter::xfrType(const uint16_t& val)
@@ -474,6 +522,21 @@ void RecordTextWriter::xfrIP6(const std::string& val)
   d_string += std::string(addrbuf);
 }
 
+void RecordTextWriter::xfrCAWithoutPort(uint8_t version, ComboAddress &val)
+{
+  string ip = val.toString();
+
+  if(!d_string.empty())
+    d_string.append(1,' ');
+
+  d_string += ip;
+}
+
+void RecordTextWriter::xfrCAPort(ComboAddress &val)
+{
+  xfr16BitInt(val.sin4.sin_port);
+}
+
 void RecordTextWriter::xfrTime(const uint32_t& val)
 {
   if(!d_string.empty())
@@ -481,14 +544,10 @@ void RecordTextWriter::xfrTime(const uint32_t& val)
   
   struct tm tm;
   time_t time=val; // Y2038 bug!
-  Utility::gmtime_r(&time, &tm);
+  gmtime_r(&time, &tm);
 
-  char tmp[16];
-  snprintf(tmp,sizeof(tmp)-1, "%04d%02d%02d" "%02d%02d%02d", 
-           tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday, 
-           tm.tm_hour, tm.tm_min, tm.tm_sec);
-  
-  d_string += tmp;
+  static const boost::format fmt("%04d%02d%02d" "%02d%02d%02d");
+  d_string += boost::str(boost::format(fmt) % (tm.tm_year+1900) % (tm.tm_mon+1) % tm.tm_mday % tm.tm_hour % tm.tm_min % tm.tm_sec);
 }
 
 
@@ -503,12 +562,18 @@ void RecordTextWriter::xfr8BitInt(const uint8_t& val)
 }
 
 // should not mess with the escapes
-void RecordTextWriter::xfrName(const DNSName& val, bool)
+void RecordTextWriter::xfrName(const DNSName& val, bool, bool noDot)
 {
   if(!d_string.empty())
     d_string.append(1,' ');
   
-  d_string+=val.toString();
+  if(d_nodot) {
+    d_string+=val.toStringRootDot();
+  }
+  else
+  {
+    d_string+=val.toString();
+  }
 }
 
 void RecordTextWriter::xfrBlobNoSpaces(const string& val, int size)
@@ -537,12 +602,12 @@ void RecordTextWriter::xfrHexBlob(const string& val, bool)
   string::size_type limit=val.size();
   char tmp[5];
   for(string::size_type n = 0; n < limit; ++n) {
-    snprintf(tmp, sizeof(tmp)-1, "%02x", (unsigned char)val[n]);
+    snprintf(tmp, sizeof(tmp), "%02x", (unsigned char)val[n]);
     d_string+=tmp;
   }
 }
 
-void RecordTextWriter::xfrText(const string& val, bool multi)
+void RecordTextWriter::xfrText(const string& val, bool multi, bool lenField)
 {
   if(!d_string.empty())
     d_string.append(1,' ');
@@ -550,6 +615,12 @@ void RecordTextWriter::xfrText(const string& val, bool multi)
   d_string.append(val);
 }
 
+void RecordTextWriter::xfrUnquotedText(const string& val, bool lenField)
+{
+  if(!d_string.empty())
+    d_string.append(1,' ');
+  d_string.append(val);
+}
 
 #ifdef TESTING
 

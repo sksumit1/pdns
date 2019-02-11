@@ -1,25 +1,24 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2002 - 2015  PowerDNS.COM BV
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2
-    as published by the Free Software Foundation
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
-
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifndef DISTRIBUTOR_HH
 #define DISTRIBUTOR_HH
 
@@ -28,6 +27,7 @@
 #include <queue>
 #include <vector>
 #include <pthread.h>
+#include "threadname.hh"
 #include <unistd.h>
 #include "logger.hh"
 #include "dns.hh"
@@ -62,14 +62,16 @@ template<class Answer, class Question, class Backend> class SingleThreadDistribu
     : public Distributor<Answer, Question, Backend>
 {
 public:
+  SingleThreadDistributor(const SingleThreadDistributor&) = delete;
+  void operator=(const SingleThreadDistributor&) = delete;
   SingleThreadDistributor();
   typedef std::function<void(Answer*)> callback_t;
   int question(Question *, callback_t callback) override; //!< Submit a question to the Distributor
-  int getQueueSize() {
+  int getQueueSize() override {
     return 0;
   }
 
-  bool isOverloaded()
+  bool isOverloaded() override
   {
     return false;
   }
@@ -85,6 +87,8 @@ template<class Answer, class Question, class Backend> class MultiThreadDistribut
     : public Distributor<Answer, Question, Backend>
 {
 public:
+  MultiThreadDistributor(const MultiThreadDistributor&) = delete;
+  void operator=(const MultiThreadDistributor&) = delete;
   MultiThreadDistributor(int n);
   typedef std::function<void(Answer*)> callback_t;
   int question(Question *, callback_t callback) override; //!< Submit a question to the Distributor
@@ -102,13 +106,13 @@ public:
 
   bool isOverloaded() override
   {
-    return d_overloaded;
+    return d_overloadQueueLength && (d_queued > d_overloadQueueLength);
   }
   
 private:
-  bool d_overloaded;
   int nextid;
   time_t d_last_started;
+  unsigned int d_overloadQueueLength, d_maxQueueLength;
   int d_num_threads;
   std::atomic<unsigned int> d_queued{0}, d_running{0};
   std::vector<std::pair<int,int>> d_pipes;
@@ -125,15 +129,25 @@ template<class Answer, class Question, class Backend>Distributor<Answer,Question
 
 template<class Answer, class Question, class Backend>SingleThreadDistributor<Answer,Question,Backend>::SingleThreadDistributor()
 {
-  L<<Logger::Error<<"Only asked for 1 backend thread - operating unthreaded"<<endl;
-  b=new Backend;
+  g_log<<Logger::Error<<"Only asked for 1 backend thread - operating unthreaded"<<endl;
+  try {
+    b=new Backend;
+  }
+  catch(const PDNSException &AE) {
+    g_log<<Logger::Error<<"Distributor caught fatal exception: "<<AE.reason<<endl;
+    _exit(1);
+  }
+  catch(...) {
+    g_log<<Logger::Error<<"Caught an unknown exception when creating backend, probably"<<endl;
+    _exit(1);
+  }
 }
 
 template<class Answer, class Question, class Backend>MultiThreadDistributor<Answer,Question,Backend>::MultiThreadDistributor(int n)
 {
   d_num_threads=n;
-  d_overloaded = false;
-
+  d_overloadQueueLength=::arg().asNum("overload-queue-length");
+  d_maxQueueLength=::arg().asNum("max-queue-length");
   nextid=0;
   d_last_started=time(0);
 
@@ -147,18 +161,24 @@ template<class Answer, class Question, class Backend>MultiThreadDistributor<Answ
     d_pipes.push_back({fds[0],fds[1]});
   }
   
-  L<<Logger::Warning<<"About to create "<<n<<" backend threads for UDP"<<endl;
+  if (n<1) {
+    g_log<<Logger::Error<<"Asked for fewer than 1 threads, nothing to do"<<endl;
+    _exit(1);
+  }
+
+  g_log<<Logger::Warning<<"About to create "<<n<<" backend threads for UDP"<<endl;
   for(int i=0;i<n;i++) {
     pthread_create(&tid,0,&makeThread,static_cast<void *>(this));
     Utility::usleep(50000); // we've overloaded mysql in the past :-)
   }
-  L<<Logger::Warning<<"Done launching threads, ready to distribute questions"<<endl;
+  g_log<<Logger::Warning<<"Done launching threads, ready to distribute questions"<<endl;
 }
 
 
 // start of a new thread
 template<class Answer, class Question, class Backend>void *MultiThreadDistributor<Answer,Question,Backend>::makeThread(void *p)
 {
+  setThreadName("pdns/distributo");
   pthread_detach(pthread_self());
   MultiThreadDistributor *us=static_cast<MultiThreadDistributor *>(p);
   int ournum=us->d_running++;
@@ -181,46 +201,66 @@ template<class Answer, class Question, class Backend>void *MultiThreadDistributo
         S.inc("timedout-packets");
         continue;
       }        
+
+      bool allowRetry=true;
+retry:
       // this is the only point where we interact with the backend (synchronous)
       try {
-        a=b->question(QD->Q); 
-	delete QD->Q;
+        if (!b) {
+          allowRetry=false;
+          b=new Backend();
+        }
+        a=b->question(QD->Q);
+        delete QD->Q;
       }
       catch(const PDNSException &e) {
-        L<<Logger::Error<<"Backend error: "<<e.reason<<endl;
-	delete b;
-	b=new Backend();
-        a=QD->Q->replyPacket();
+        delete b;
+        b=NULL;
+        if (!allowRetry) {
+          g_log<<Logger::Error<<"Backend error: "<<e.reason<<endl;
+          a=QD->Q->replyPacket();
 
-        a->setRcode(RCode::ServFail);
-        S.inc("servfail-packets");
-        S.ringAccount("servfail-queries",QD->Q->qdomain.toString());
+          a->setRcode(RCode::ServFail);
+          S.inc("servfail-packets");
+          S.ringAccount("servfail-queries",QD->Q->qdomain.toLogString());
 
-	delete QD->Q;
+          delete QD->Q;
+        } else {
+          g_log<<Logger::Notice<<"Backend error (retry once): "<<e.reason<<endl;
+          goto retry;
+        }
       }
       catch(...) {
-        L<<Logger::Error<<"Caught unknown exception in Distributor thread "<<(long)pthread_self()<<endl;
-	delete b;
-	b=new Backend();
-        a=QD->Q->replyPacket();
-	
-        a->setRcode(RCode::ServFail);
-        S.inc("servfail-packets");
-        S.ringAccount("servfail-queries",QD->Q->qdomain.toString());
-	delete QD->Q;
+        delete b;
+        b=NULL;
+        if (!allowRetry) {
+          g_log<<Logger::Error<<"Caught unknown exception in Distributor thread "<<(long)pthread_self()<<endl;
+          a=QD->Q->replyPacket();
+
+          a->setRcode(RCode::ServFail);
+          S.inc("servfail-packets");
+          S.ringAccount("servfail-queries",QD->Q->qdomain.toLogString());
+
+          delete QD->Q;
+        } else {
+          g_log<<Logger::Warning<<"Caught unknown exception in Distributor thread "<<(long)pthread_self()<<" (retry once)"<<endl;
+          goto retry;
+        }
       }
 
       QD->callback(a);
       delete QD;
     }
-    
+
     delete b;
   }
   catch(const PDNSException &AE) {
-    L<<Logger::Error<<"Distributor caught fatal exception: "<<AE.reason<<endl;
+    g_log<<Logger::Error<<"Distributor caught fatal exception: "<<AE.reason<<endl;
+    _exit(1);
   }
   catch(...) {
-    L<<Logger::Error<<"Caught an unknown exception when creating backend, probably"<<endl;
+    g_log<<Logger::Error<<"Caught an unknown exception when creating backend, probably"<<endl;
+    _exit(1);
   }
   return 0;
 }
@@ -228,26 +268,44 @@ template<class Answer, class Question, class Backend>void *MultiThreadDistributo
 template<class Answer, class Question, class Backend>int SingleThreadDistributor<Answer,Question,Backend>::question(Question* q, callback_t callback)
 {
   Answer *a;
+  bool allowRetry=true;
+retry:
   try {
+    if (!b) {
+      allowRetry=false;
+      b=new Backend;
+    }
     a=b->question(q); // a can be NULL!
   }
   catch(const PDNSException &e) {
-    L<<Logger::Error<<"Backend error: "<<e.reason<<endl;
     delete b;
-    b=new Backend;
-    a=q->replyPacket();
-    a->setRcode(RCode::ServFail);
-    S.inc("servfail-packets");
-    S.ringAccount("servfail-queries",q->qdomain.toString());
+    b=NULL;
+    if (!allowRetry) {
+      g_log<<Logger::Error<<"Backend error: "<<e.reason<<endl;
+      a=q->replyPacket();
+
+      a->setRcode(RCode::ServFail);
+      S.inc("servfail-packets");
+      S.ringAccount("servfail-queries",q->qdomain.toLogString());
+    } else {
+      g_log<<Logger::Notice<<"Backend error (retry once): "<<e.reason<<endl;
+      goto retry;
+    }
   }
   catch(...) {
-    L<<Logger::Error<<"Caught unknown exception in Distributor thread "<<(unsigned long)pthread_self()<<endl;
     delete b;
-    b=new Backend;
-    a=q->replyPacket();
-    a->setRcode(RCode::ServFail);
-    S.inc("servfail-packets");
-    S.ringAccount("servfail-queries",q->qdomain.toString());
+    b=NULL;
+    if (!allowRetry) {
+      g_log<<Logger::Error<<"Caught unknown exception in Distributor thread "<<(unsigned long)pthread_self()<<endl;
+      a=q->replyPacket();
+
+      a->setRcode(RCode::ServFail);
+      S.inc("servfail-packets");
+      S.ringAccount("servfail-queries",q->qdomain.toLogString());
+    } else {
+      g_log<<Logger::Warning<<"Caught unknown exception in Distributor thread "<<(unsigned long)pthread_self()<<" (retry once)"<<endl;
+      goto retry;
+    }
   }
   callback(a);
   return 0;
@@ -259,6 +317,7 @@ template<class Answer, class Question, class Backend>int MultiThreadDistributor<
 {
   q=new Question(*q);
 
+  // this is passed to other process over pipe and released there
   auto QD=new QuestionData();
   QD->Q=q;
   auto ret = QD->id = nextid++; // might be deleted after write!
@@ -268,15 +327,11 @@ template<class Answer, class Question, class Backend>int MultiThreadDistributor<
     unixDie("write");
 
   d_queued++;
-  
-  static unsigned int overloadQueueLength=::arg().asNum("overload-queue-length");
-  static unsigned int maxQueueLength=::arg().asNum("max-queue-length");
 
-  if(overloadQueueLength) 
-    d_overloaded= d_queued > overloadQueueLength;
 
-  if(d_queued > maxQueueLength) {
-    L<<Logger::Error<< d_queued <<" questions waiting for database/backend attention. Limit is "<<::arg().asNum("max-queue-length")<<", respawning"<<endl;
+
+  if(d_queued > d_maxQueueLength) {
+    g_log<<Logger::Error<< d_queued <<" questions waiting for database/backend attention. Limit is "<<::arg().asNum("max-queue-length")<<", respawning"<<endl;
     // this will leak the entire contents of all pipes, nothing will be freed. Respawn when this happens!
     throw DistributorFatal();
   }

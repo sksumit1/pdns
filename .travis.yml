@@ -1,250 +1,41 @@
+sudo: required
+dist: trusty
 language: cpp
 compiler:
   - gcc
   - clang
+env:
+  - PDNS_BUILD_PRODUCT=auth
+  - PDNS_BUILD_PRODUCT=recursor
+  - PDNS_BUILD_PRODUCT=dnsdist
+  - PDNS_BUILD_PRODUCT=ixfrdist
+
+cache:
+  - pip
+
 before_script:
- - git describe --always --dirty=+
- - sudo /sbin/ip addr add 10.0.3.0/24 dev lo
- - sudo /sbin/ip addr add 1.2.3.4/32 dev lo
- - sudo rm -f /etc/apt/sources.list.d/travis_ci_zeromq3-source.list
- - sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
- - sudo apt-add-repository -y ppa:linuxjedi/ppa
- - sudo add-apt-repository -y ppa:boost-latest/ppa
- - sudo apt-get update -qq
- - sudo apt-get -qq install g++-4.8
- - sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-4.8 90
- - sudo apt-get install --quiet --quiet --no-install-recommends
-     alien
-     authbind
-     bc
-     bind9utils
-     cmake
-     daemontools
-     dnsutils
-     faketime
-     geoip-database
-     ldnsutils
-     boost1.55
-     libbotan1.10-dev
-     libcdb-dev
-     libcurl4-openssl-dev
-     libldap2-dev
-     liblua5.1-posix1
-     libnet-dns-perl
-     libopendbx1-dev
-     libopendbx1-sqlite3
-     libp11-kit-dev
-     libssl-dev
-     libtolua-dev
-     libtool
-     links
-     moreutils
-     p11-kit
-     pkg-config
-     python-virtualenv
-     rpm
-     ruby-json
-     ruby-sqlite3
-     ruby1.9.1
-     rubygems
-     socat
-     softhsm
-     time
-     unbound-host
-     xmlto
- - sudo sh -c 'sed s/precise/trusty/g /etc/apt/sources.list > /etc/apt/sources.list.d/trusty.list'
- - sudo apt-get update --quiet --quiet
- - sudo apt-get install --quiet --quiet liblmdb0 liblmdb-dev lmdb-utils libyaml-cpp-dev libzmq3-dev pandoc libgeoip-dev
- - sudo pip install pandocfilters==1.2.3 mkdocs==0.14 linkchecker==9.3 click==5.1
- - sudo update-alternatives --set ruby /usr/bin/ruby1.9.1
- - sudo touch /etc/authbind/byport/53
- - sudo chmod 755 /etc/authbind/byport/53
- - sudo add-apt-repository -y ppa:webupd8team/java
- - sudo apt-get update -qq
- - cd ..
- - sudo service cassandra stop 
- - wget http://archive.apache.org/dist/cassandra/2.1.9/apache-cassandra-2.1.9-bin.tar.gz
- - sudo rm -rf /usr/local/cassandra/*
- - sudo rm -rf /var/lib/cassandra/*
- - sudo tar -xzf apache-cassandra-2.1.9-bin.tar.gz -C /usr/local/cassandra/ --strip-components=1
- - cat /usr/local/cassandra/conf/cassandra.yaml | sed -e "s/AllowAllAuthenticator/PasswordAuthenticator/" >  cassandra.yaml
- - cat cassandra.yaml | sed -e "s/localhost/127.0.0.1/g" >  cassandra.yaml.new
- - sudo mv cassandra.yaml.new /usr/local/cassandra/conf/cassandra.yaml
- - cat /etc/init.d/cassandra | sed -e "s/apache-cassandra-2.0.9.jar/apache-cassandra-2.1.9.jar/g" >  cassandra
- - sudo mv cassandra /etc/init.d/cassandra
- - sudo chmod 755 /etc/init.d/cassandra
- - cat /usr/local/cassandra/conf/cassandra-env.sh | sed "s/\${MAX_HEAP_SIZE}/512M/g" > cassandra-env.sh1
- - cat cassandra-env.sh1 | sed "s/\${HEAP_NEWSIZE}/32M/g" > cassandra-env.sh2
- - sudo mv cassandra-env.sh2 /usr/local/cassandra/conf/cassandra-env.sh
- - rm -rf cassandra-env.sh1
-  #The restart script of cassandra is broken. 
- - sudo service cassandra stop
- - sudo service cassandra start
- - sleep 20
- - wget http://downloads.datastax.com/cpp-driver/ubuntu/12.04/libuv_1.4.2-1_amd64.deb
- - sudo dpkg -i libuv_1.4.2-1_amd64.deb
- - wget http://downloads.datastax.com/cpp-driver/ubuntu/12.04/libuv-dev_1.4.2-1_amd64.deb
- - sudo dpkg -i libuv-dev_1.4.2-1_amd64.deb
- - wget http://downloads.datastax.com/cpp-driver/ubuntu/12.04/cassandra-cpp-driver_2.1.0-1_amd64.deb
- - sudo dpkg -i cassandra-cpp-driver_2.1.0-1_amd64.deb
- - wget http://downloads.datastax.com/cpp-driver/ubuntu/12.04/cassandra-cpp-driver-dev_2.1.0-1_amd64.deb
- - sudo dpkg -i cassandra-cpp-driver-dev_2.1.0-1_amd64.deb
- - sudo ln -s /usr/lib/x86_64-linux-gnu/libcassandra.so.2.1.0 /usr/lib/libcassandra.so
- - sudo ln -s /usr/lib/x86_64-linux-gnu/libcassandra_static.a /usr/lib/libcassandra_static.a
- - wget ftp://ftp.nominum.com/pub/nominum/dnsperf/2.0.0.0/dnsperf-2.0.0.0-1-rhel-6-x86_64.tar.gz
- - tar xzvf dnsperf-2.0.0.0-1-rhel-6-x86_64.tar.gz
- - fakeroot alien --to-deb dnsperf-2.0.0.0-1/dnsperf-2.0.0.0-1.el6.x86_64.rpm
- - sudo dpkg -i dnsperf_2.0.0.0-2_amd64.deb
- - cd pdns
- - cd modules/cassandrabackend
- - echo `echo "source 'script.cql';" | /usr/local/cassandra/bin/cqlsh -u cassandra -p cassandra  > script_install.log 2>&1`
- - cat script_install.log
- - sudo rm -rf script_install.log
- - cd test
- - echo `echo "source 'testdata.cql';" | /usr/local/cassandra/bin/cqlsh -u pdns -p pdns -k pdns > testdata_install.log 2>&1`
- - cat testdata_install.log
- - sudo rm -rf testdata_install.log
- - sudo iptables -F
- - sudo service cassandra stop
- - cd ../../../..
- - wget https://xs.powerdns.com/tmp/libsodium_1.0.2-1_amd64.deb
- - sudo dpkg -i libsodium_1.0.2-1_amd64.deb
- - sudo mv /usr/local/lib/libsodium.* /usr/lib
- - wget http://s3.amazonaws.com/alexa-static/top-1m.csv.zip
- - unzip top-1m.csv.zip -d ./pdns/regression-tests
- - cd pdns
- - travis_retry gem install bundler --no-rdoc --no-ri
- - cd modules/remotebackend
- - travis_retry ruby -S bundle install
- - cd ../..
- - sudo mkdir -p /etc/pkcs11/modules/
- - sudo cp -f regression-tests/softhsm.mod /etc/pkcs11/modules/softhsm
- - sudo cp -f regression-tests/softhsm.conf /etc/softhsm/softhsm.conf
- - sudo chmod 0755 /etc/softhsm/
- - sudo chmod 0644 /etc/softhsm/softhsm.conf
- - sudo chmod 0777 /var/lib/softhsm
- - p11-kit -l # ensure it's ok
+  - git describe --always --dirty=+
+  - sudo rm -f /etc/apt/sources.list.d/*.list
+
+  ### setup travis environment ###
+  - sudo sysctl net.ipv6.conf.lo.disable_ipv6=0
+  - export POSIXLY_CORRECT=1
+  - export CFLAGS=-O0
+  - export CXXFLAGS=-O0
+  - export OPTFLAGS=-O0
+  - sudo apt-get -qq update
+  # you can remove this when updating dist to something newer than trusty
+  - pyenv global 2.7
+  # needed for virtualenv to use the pyenv python
+  - pip install virtualenv
+
 script:
- - ./bootstrap
-#DNSName     --with-dynmodules='bind gmysql gpgsql gsqlite3 mydns tinydns remote random opendbx ldap lmdb lua'
-#Build without --enable-botan1.10 option, Botan/SoftHSM conflict #2496
- - CFLAGS='-O1' CXXFLAGS='-O1' ./configure
-     --with-dynmodules='bind gmysql geoip gpgsql gsqlite3 mydns tinydns pipe remote random opendbx ldap lua cassandra'
-     --with-modules=''
-     --with-sqlite3
-     --enable-unit-tests
-     --enable-remotebackend-zeromq
-     --enable-libsodium
-     --enable-experimental-pkcs11
-     --enable-tools
-     --disable-dependency-tracking
- - make -k dist
- - make -k -j 2
- - cd docs
- - sudo pwd
- - make check-links
- - cd ..
- - make -k install DESTDIR=/tmp/pdns-install-dir
- - find /tmp/pdns-install-dir -ls
- - make -j 2 check
- - test -f pdns/test-suite.log && cat pdns/test-suite.log || true
- - test -f modules/remotebackend/test-suite.log && cat modules/remotebackend/test-suite.log || true
-# DNSName: - make -k -j 2 -C pdns $(grep '(EXEEXT):' pdns/Makefile | cut -f1 -d\$ | grep -E -v 'dnsdist|calidns')
- - make -k -j 2 -C pdns $(grep '(EXEEXT):' pdns/Makefile | cut -f1 -d\$ | grep -E -v 'dnsdist|calidns|zone2lmdb|speedtest')
- - cd pdns
- - make -k -j 2 pdns_recursor
- - rm -f pdns_recursor
- - ./pdnssec test-algorithms
- - cd ..
- - ./build-scripts/dist-recursor
- - cd pdns/pdns-recursor-*/
- - OPTFLAGS=-O0 ./configure
- - OPTFLAGS=-O0 make -k -j 2
- - cd ..
- - ln -s pdns-recursor*/pdns_recursor .
- - cd ..
- - ./build-scripts/dist-dnsdist
- - cd pdns/dnsdistdist
- - tar xf dnsdist*.tar.bz2
- - cd dnsdist-*
- - CFLAGS='-O0' CXXFLAGS='-O0' ./configure
- - make -k -j 2
- - cd ..
- - rm -rf dnsdist-*/
- - cd ../../
- - cd regression-tests.recursor
- - cp vars.sample vars
- - ./config.sh
- - ./start.sh
- - sleep 3
- - svstat configs/*
- - ./runtests
-#DNSName - test ! -s ./failed_tests
- - ./stop.sh
- - sleep 3
- - ./clean.sh
-#DNSName - cd ../regression-tests.api
-#DNSName - ./runtests authoritative
-#DNSName - ./runtests recursor
- - cd ../regression-tests
- - touch tests/verify-dnssec-zone/allow-missing
- - touch tests/verify-dnssec-zone/skip.nsec3 # some (travis) tools in this test are unable to handle nsec3 zones
- - touch tests/verify-dnssec-zone/skip.optout
- - export geoipregion=oc geoipregionip=1.2.3.4
- - ./timestamp ./start-test-stop 5300 bind-both
- - ./timestamp ./start-test-stop 5300 bind-dnssec-both
- - ./timestamp ./start-test-stop 5300 bind-dnssec-pkcs11
- - ./timestamp ./start-test-stop 5300 bind-dnssec-nsec3-both
- - ./timestamp ./start-test-stop 5300 bind-dnssec-nsec3-optout-both
- - ./timestamp ./start-test-stop 5300 bind-dnssec-nsec3-narrow
- - ./timestamp ./start-test-stop 5300 bind-hybrid-nsec3
- - ./timestamp ./start-test-stop 5300 geoipbackend
- - ./timestamp ./start-test-stop 5300 geoipbackend-nsec3-narrow
- - ./timestamp ./start-test-stop 5300 gmysql-nodnssec-both
- - ./timestamp ./start-test-stop 5300 gmysql-both
- - ./timestamp ./start-test-stop 5300 gmysql-nsec3-both
- - ./timestamp ./start-test-stop 5300 gmysql-nsec3-optout-both
- - ./timestamp ./start-test-stop 5300 gmysql-nsec3-narrow
- - ./timestamp ./start-test-stop 5300 gpgsql-nodnssec-both
-# - ./timestamp ./start-test-stop 5300 gpgsql-both
- - ./timestamp ./start-test-stop 5300 gpgsql-nsec3-both
-# - ./timestamp ./start-test-stop 5300 gpgsql-nsec3-optout-both
-# - ./timestamp ./start-test-stop 5300 gpgsql-nsec3-narrow
- - ./timestamp ./start-test-stop 5300 gsqlite3-nodnssec-both
-# - ./timestamp ./start-test-stop 5300 gsqlite3-both
- - ./timestamp ./start-test-stop 5300 gsqlite3-nsec3-both
-# - ./timestamp ./start-test-stop 5300 gsqlite3-nsec3-optout-both
-# - ./timestamp ./start-test-stop 5300 gsqlite3-nsec3-narrow
-#DNSName - ./timestamp ./start-test-stop 5300 lmdb-nodnssec
- - ./timestamp ./start-test-stop 5300 mydns
- - ./timestamp ./start-test-stop 5300 opendbx-sqlite3
- - travis_retry ./timestamp timeout 120s ./start-test-stop 5300 remotebackend-pipe
- - travis_retry ./timestamp timeout 120s ./start-test-stop 5300 remotebackend-pipe-dnssec
-# - travis_retry ./timestamp timeout 120s ./start-test-stop 5300 remotebackend-unix
- - travis_retry ./timestamp timeout 120s ./start-test-stop 5300 remotebackend-unix-dnssec
-# - travis_retry ./timestamp timeout 120s ./start-test-stop 5300 remotebackend-http
- - travis_retry ./timestamp timeout 120s ./start-test-stop 5300 remotebackend-http-dnssec
-# - travis_retry ./timestamp timeout 120s ./start-test-stop 5300 remotebackend-zeromq
- - travis_retry ./timestamp timeout 120s ./start-test-stop 5300 remotebackend-zeromq-dnssec
- - ./timestamp ./start-test-stop 5300 tinydns
- # Cassandra uses lot of memory resources.Its better to turn this on only before the test. Otherwise OOM killer kills it.
- - sudo service cassandra start
- - sleep 20
- - ./timestamp ./start-test-stop 5300 cassandra
- - rm -f tests/verify-dnssec-zone/allow-missing
- - rm -f tests/verify-dnssec-zone/skip.nsec3
- - rm -f tests/verify-dnssec-zone/skip.optout
- - THRESHOLD=90 TRACE=no ./timestamp ./recursor-test 5300 25000
- - cd ../regression-tests.nobackend/
- - ./runtests
- - test ! -s ./failed_tests
- - cd ..
- - git status
- - git status | grep -q clean
+  - ./build-scripts/travis.sh
+
 notifications:
   irc:
     channels:
-      - "irc.oftc.net#powerdns-dev"
+      - secure: "RDw5WKYf/gS3JnfIdkK51U4K2Xg/WNMn1uB/5AZbHbcqZJ/ZnbILCu0eBC83blQr+UuaQG7/sUFhWbtwoivD2I/4wOQGWIysBEZ8bSoySPSc4u0YU45aPjN+Ohrrp9qw7Smts3tYHbrOqfLfZ39L8lJq06vuMoBp6eHVkSBT7AY="
     template:
       - "%{author} @ %{repository} / %{branch} - Build:#%{build_number} : %{message} - Changes: %{compare_url} - Build details: %{build_url}"
     use_notice: true

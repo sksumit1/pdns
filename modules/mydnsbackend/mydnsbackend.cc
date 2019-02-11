@@ -1,7 +1,27 @@
 /*
- * PowerDNS backend module for MyDNS style databases
- * Author: Jonathan Oddy (Hostway UK) <jonathan@woaf.net>
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ * originally authored by Jonathan Oddy
  *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
+
+/*
  * The schema used by MyDNS isn't suitable for retrieving results with a single
  * query. This means that existing PowerDNS backends are unable to make use of
  * the schema without lame hackery (or awful performance.) This module does
@@ -34,7 +54,6 @@
 #include "pdns/dnsbackend.hh"
 #include "mydnsbackend.hh"
 #include "pdns/dnspacket.hh"
-#include "pdns/ueberbackend.hh"
 #include "pdns/pdnsexception.hh"
 #include "pdns/logger.hh"
 #include "pdns/arguments.hh"
@@ -46,14 +65,6 @@ static string backendName="[MyDNSbackend]";
 MyDNSBackend::MyDNSBackend(const string &suffix) {
   setArgPrefix("mydns"+suffix);
  
-  d_domainIdQuery_stmt = NULL;
-  d_domainNoIdQuery_stmt = NULL;
-  d_listQuery_stmt = NULL;
-  d_soaQuery_stmt = NULL;
-  d_basicQuery_stmt = NULL;
-  d_anyQuery_stmt = NULL;
-  d_query_stmt = NULL;
-
   try {
     d_db = new SMySQL(getArg("dbname"),
       getArg("host"),
@@ -64,7 +75,7 @@ MyDNSBackend::MyDNSBackend(const string &suffix) {
     d_db->setLog(::arg().mustDo("query-logging"));
   }
   catch(SSqlException &e) {
-    L<<Logger::Error<<backendName<<" Connection failed: "<<e.txtReason()<<endl;
+    g_log<<Logger::Error<<backendName<<" Connection failed: "<<e.txtReason()<<endl;
     throw PDNSException(backendName+"Unable to launch connection: "+e.txtReason());
   }
 
@@ -79,24 +90,27 @@ MyDNSBackend::MyDNSBackend(const string &suffix) {
   d_useminimalttl=mustDo("use-minimal-ttl");
   d_minimum=0;
 
-  L<<Logger::Warning<<backendName<<" Connection successful"<<endl;
+  g_log<<Logger::Warning<<backendName<<" Connection successful"<<endl;
 
   try {
 
     string domainIdQuery = "SELECT origin, minimum FROM `"+soatable+"` WHERE id = ?";
     string domainNoIdQuery = "SELECT id, origin, minimum FROM `"+soatable+"` WHERE origin = ?";
     string soaQuery = "SELECT id, mbox, serial, ns, refresh, retry, expire, minimum, ttl FROM `"+soatable+"` WHERE origin = ?";
+    string allDomainsQuery = "SELECT id, origin, serial FROM `"+soatable+"`";
 
     if (!soawhere.empty()) {
       domainIdQuery += " AND " + soawhere;  
       domainNoIdQuery += " AND " + soawhere;
       soaQuery += " AND "+soawhere;
+      allDomainsQuery += " WHERE "+soawhere;
     }
 
     d_domainIdQuery_stmt = d_db->prepare(domainIdQuery, 1);
     d_domainNoIdQuery_stmt = d_db->prepare(domainNoIdQuery, 1);
     d_soaQuery_stmt = d_db->prepare(soaQuery, 1);
-  
+    d_allDomainsQuery_stmt = d_db->prepare(allDomainsQuery, 0);
+
     string listQuery = "SELECT type, data, aux, ttl, zone, name FROM `"+rrtable+"` WHERE zone = ?";
     string basicQuery = "SELECT type, data, aux, ttl, zone FROM `"+rrtable+"` WHERE zone = ? AND (name = ? OR name = ?) AND type = ?";
     string anyQuery = "(SELECT type, data, aux, ttl, zone FROM `"+rrtable+"` WHERE zone = ? AND (name = ? OR name = ?)";
@@ -109,7 +123,7 @@ MyDNSBackend::MyDNSBackend(const string &suffix) {
 
     d_listQuery_stmt = d_db->prepare(listQuery, 1);
   
-    anyQuery += ") UNION (SELECT 'SOA' AS type, origin AS data, '0' AS aux, ttl, id AS zone FROM `"+soatable+"` WHERE id = ? AND origin = ?";
+    anyQuery += ") UNION (SELECT 'SOA' AS type, CONCAT_WS(' ', ns, mbox,serial,refresh,retry,expire,minimum) AS data, '0' AS aux, ttl, id AS zone FROM `"+soatable+"` WHERE id = ? AND origin = ?";
 
     if (!soawhere.empty()) {
       anyQuery += " AND "+soawhere;
@@ -121,24 +135,21 @@ MyDNSBackend::MyDNSBackend(const string &suffix) {
     d_basicQuery_stmt = d_db->prepare(basicQuery, 4);
     d_anyQuery_stmt = d_db->prepare(anyQuery, 5);
   } catch (SSqlException &e) {
-    L<<Logger::Error<<"Cannot prepare statements: " << e.txtReason() <<endl;
+    g_log<<Logger::Error<<"Cannot prepare statements: " << e.txtReason() <<endl;
     throw PDNSException("Cannot prepare statements: " + e.txtReason());
   }
+  // keeps static analyzers happy
+  d_query_stmt = nullptr;
 }
 
 MyDNSBackend::~MyDNSBackend() {
-  delete d_domainIdQuery_stmt;
-  d_domainIdQuery_stmt = NULL;
-  delete d_domainNoIdQuery_stmt;
-  d_domainNoIdQuery_stmt = NULL;
-  delete d_listQuery_stmt;
-  d_listQuery_stmt = NULL;
-  delete d_soaQuery_stmt;
-  d_soaQuery_stmt = NULL;
-  delete d_basicQuery_stmt;
-  d_basicQuery_stmt = NULL;
-  delete d_anyQuery_stmt;
-  d_anyQuery_stmt = NULL;
+  d_domainIdQuery_stmt.release();
+  d_domainNoIdQuery_stmt.release();
+  d_listQuery_stmt.release();
+  d_soaQuery_stmt.release();
+  d_basicQuery_stmt.release();
+  d_anyQuery_stmt.release();
+  d_allDomainsQuery_stmt.release();
   delete(d_db);
 }
 
@@ -165,15 +176,15 @@ bool MyDNSBackend::list(const DNSName &target, int zoneId, bool include_disabled
   d_origin = d_result[0][0];
   if (d_origin[d_origin.length()-1] == '.')
     d_origin.erase(d_origin.length()-1);
-  d_minimum = atol(d_result[0][1].c_str());
+  d_minimum = pdns_stou(d_result[0][1]);
 
   if (d_result.size()>1) {
-    L<<Logger::Warning<<backendName<<" Found more than one matching origin for zone ID: "<<zoneId<<endl;
+    g_log<<Logger::Warning<<backendName<<" Found more than one matching origin for zone ID: "<<zoneId<<endl;
   };
 
   try {
-    d_query_stmt = d_listQuery_stmt;
-    d_query_stmt->
+    d_query_stmt = &d_listQuery_stmt;
+    (*d_query_stmt)->
       bind("domain_id", zoneId)->
       execute();
   }
@@ -185,7 +196,7 @@ bool MyDNSBackend::list(const DNSName &target, int zoneId, bool include_disabled
   return true;
 }
 
-bool MyDNSBackend::getSOA(const DNSName& name, SOAData& soadata, DNSPacket*) {
+bool MyDNSBackend::getSOA(const DNSName& name, SOAData& soadata) {
   string query;
   SSqlStatement::row_t rrow;
 
@@ -200,7 +211,7 @@ bool MyDNSBackend::getSOA(const DNSName& name, SOAData& soadata, DNSPacket*) {
       reset();
   }
   catch (SSqlException &e) {
-    throw PDNSException("MyDNSBackend unable to get soa for domain "+name.toString()+": "+e.txtReason());
+    throw PDNSException("MyDNSBackend unable to get soa for domain "+name.toLogString()+": "+e.txtReason());
   }
 
   if (d_result.empty()) {
@@ -210,22 +221,22 @@ bool MyDNSBackend::getSOA(const DNSName& name, SOAData& soadata, DNSPacket*) {
   rrow = d_result[0];
 
   soadata.qname = name;
-  soadata.domain_id = atol(rrow[0].c_str());
+  soadata.domain_id = pdns_stou(rrow[0]);
   soadata.hostmaster = DNSName(rrow[1]);
-  soadata.serial = atol(rrow[2].c_str());
+  soadata.serial = pdns_stou(rrow[2]);
   soadata.nameserver = DNSName(rrow[3]);
-  soadata.refresh = atol(rrow[4].c_str());
-  soadata.retry = atol(rrow[5].c_str());
-  soadata.expire = atol(rrow[6].c_str());
-  soadata.default_ttl = atol(rrow[7].c_str());
-  soadata.ttl = atol(rrow[8].c_str());
+  soadata.refresh = pdns_stou(rrow[4]);
+  soadata.retry = pdns_stou(rrow[5]);
+  soadata.expire = pdns_stou(rrow[6]);
+  soadata.default_ttl = pdns_stou(rrow[7]);
+  soadata.ttl = pdns_stou(rrow[8]);
   if (d_useminimalttl) {
     soadata.ttl = std::min(soadata.ttl, soadata.default_ttl);
   }
   soadata.db = this;
 
   if (d_result.size()>1) {
-    L<<Logger::Warning<<backendName<<" Found more than one matching zone for: "<<name<<endl;
+    g_log<<Logger::Warning<<backendName<<" Found more than one matching zone for: "<<name<<endl;
   };
 
   return true;
@@ -242,7 +253,7 @@ void MyDNSBackend::lookup(const QType &qtype, const DNSName &qname, DNSPacket *p
     return;
   }
 
-  DLOG(L<<Logger::Debug<<"MyDNSBackend::lookup(" << qtype.getName() << "," << qname << ",p," << zoneId << ")" << endl);
+  DLOG(g_log<<Logger::Debug<<"MyDNSBackend::lookup(" << qtype.getName() << "," << qname << ",p," << zoneId << ")" << endl);
 
   if (zoneId < 0) {
     // First off we need to work out what zone we're working with
@@ -258,14 +269,14 @@ void MyDNSBackend::lookup(const QType &qtype, const DNSName &qname, DNSPacket *p
           reset();
       }
       catch (SSqlException &e) {
-        throw PDNSException("MyDNSBackend unable to lookup "+qname.toString()+": "+e.txtReason());
+        throw PDNSException("MyDNSBackend unable to lookup "+qname.toLogString()+": "+e.txtReason());
       }
 
       if (d_result.empty() == false) {
         rrow = d_result[0];
-        zoneId = boost::lexical_cast<int>(rrow[0]);
+        zoneId = pdns_stou(rrow[0]);
         d_origin = stripDot(rrow[1]);
-        d_minimum = atol(rrow[2].c_str());
+        d_minimum = pdns_stou(rrow[2]);
         found = true;
         break;
       }
@@ -281,41 +292,38 @@ void MyDNSBackend::lookup(const QType &qtype, const DNSName &qname, DNSPacket *p
         reset();
     }
     catch (SSqlException &e) {
-      throw PDNSException("MyDNSBackend unable to lookup "+qname.toString()+": "+e.txtReason());
+      throw PDNSException("MyDNSBackend unable to lookup "+qname.toLogString()+": "+e.txtReason());
     }
 
     if(d_result.empty()) {
-      throw PDNSException("lookup() passed zoneId = "+itoa(zoneId)+" but no such zone!");
+      return; // just return if zone was not found instead of throwing an error
     }
 
     rrow = d_result[0];
 
     found = true;
     d_origin = stripDot(rrow[0]);
-    d_minimum = atol(rrow[1].c_str());
+    d_minimum = pdns_stou(rrow[1]);
   }
-
 
   if (found) {
 
     while (d_result.size()>1) {
-      L<<Logger::Warning<<backendName<<" Found more than one matching zone for: "+d_origin<<endl;
+      g_log<<Logger::Warning<<backendName<<" Found more than one matching zone for: "+d_origin<<endl;
     };
     // We found the zoneId, so we can work out how to find our rr
     string host;
 
     // The host part of the query is the name less the origin
-    if (qname.length() == d_origin.length())
-      host = "";
-    else
-      host = qname.toString().substr(0, (qname.length() - d_origin.length())-1);
+    DNSName origin(d_origin);
+    host = qname.makeRelative(origin).toStringNoDot();    
 
     try {
 
       if (qtype.getCode()==QType::ANY) {
-        DLOG(L<<Logger::Debug<<"Running d_anyQuery_stmt with " << zoneId << ", " << host << ", " << sdom  << ", " << zoneId <<" , "<< qname << ", " << qtype.getName() << endl);
-        d_query_stmt = d_anyQuery_stmt;
-        d_query_stmt->
+        DLOG(g_log<<Logger::Debug<<"Running d_anyQuery_stmt with " << zoneId << ", " << host << ", " << sdom  << ", " << zoneId <<" , "<< qname << ", " << qtype.getName() << endl);
+        d_query_stmt = &d_anyQuery_stmt;
+        (*d_query_stmt)->
           bind("domain_id", zoneId)->
           bind("host", host)->
           bind("qname", qname.toString())->
@@ -323,9 +331,9 @@ void MyDNSBackend::lookup(const QType &qtype, const DNSName &qname, DNSPacket *p
           bind("qname2", sdom.toString())->
           execute();
       } else {
-        DLOG(L<<Logger::Debug<<"Running d_basicQuery_stmt with " << zoneId << ", " << host << ", " << qname << ", " << qtype.getName() << endl);
-        d_query_stmt = d_basicQuery_stmt;
-        d_query_stmt->
+        DLOG(g_log<<Logger::Debug<<"Running d_basicQuery_stmt with " << zoneId << ", " << host << ", " << qname << ", " << qtype.getName() << endl);
+        d_query_stmt = &d_basicQuery_stmt;
+        (*d_query_stmt)->
           bind("domain_id", zoneId)->
           bind("host", host)->
           bind("qname", qname.toString())->
@@ -334,7 +342,7 @@ void MyDNSBackend::lookup(const QType &qtype, const DNSName &qname, DNSPacket *p
       }
     }
     catch (SSqlException &e) {
-      throw PDNSException("MyDNSBackend unable to lookup "+qname.toString()+": "+e.txtReason());
+      throw PDNSException("MyDNSBackend unable to lookup "+qname.toLogString()+": "+e.txtReason());
     }
 
     d_qname = qname.toString();
@@ -346,7 +354,7 @@ bool MyDNSBackend::get(DNSResourceRecord &rr) {
   if (d_origin.empty()) {
     if (d_query_stmt) {
       try {
-        d_query_stmt->reset();
+        (*d_query_stmt)->reset();
       } catch (SSqlException &e) {
         throw PDNSException("MyDNSBackend unable to lookup "+d_qname+": "+e.txtReason());
       }
@@ -358,9 +366,9 @@ bool MyDNSBackend::get(DNSResourceRecord &rr) {
 
   SSqlStatement::row_t rrow;
 
-  if (d_query_stmt->hasNextRow()) {
+  if ((*d_query_stmt)->hasNextRow()) {
     try {
-      d_query_stmt->nextRow(rrow);
+      (*d_query_stmt)->nextRow(rrow);
     } catch (SSqlException &e) {
       throw PDNSException("MyDNSBackend unable to lookup "+d_qname+": "+e.txtReason());
     }
@@ -400,10 +408,10 @@ bool MyDNSBackend::get(DNSResourceRecord &rr) {
     if (rr.qtype.getCode() == QType::MX || rr.qtype.getCode() == QType::SRV)
       rr.content=rrow[2]+" "+rr.content;
 
-    rr.ttl = atol(rrow[3].c_str());
+    rr.ttl = pdns_stou(rrow[3]);
     if (d_useminimalttl)
       rr.ttl = std::min(rr.ttl, d_minimum);
-    rr.domain_id=atol(rrow[4].c_str());
+    rr.domain_id=pdns_stou(rrow[4]);
   
     rr.last_modified=0;
 
@@ -411,7 +419,7 @@ bool MyDNSBackend::get(DNSResourceRecord &rr) {
   }
 
   try {
-    d_query_stmt->reset();
+    (*d_query_stmt)->reset();
   } catch (SSqlException &e) {
     throw PDNSException("MyDNSBackend unable to lookup "+d_qname+": "+e.txtReason());
   }
@@ -419,6 +427,34 @@ bool MyDNSBackend::get(DNSResourceRecord &rr) {
   d_query_stmt = NULL;
 
   return false;
+}
+
+void MyDNSBackend::getAllDomains(vector<DomainInfo> *domains, bool include_disabled) {
+  /* include_disabled is unfortunately ignored here */
+  try {
+    d_allDomainsQuery_stmt->
+      execute();
+
+    while(d_allDomainsQuery_stmt->hasNextRow()) {
+      SSqlStatement::row_t row;
+      DomainInfo di;
+      d_allDomainsQuery_stmt->nextRow(row);
+
+      di.id = pdns_stou(row[0]);
+      di.zone = DNSName(row[1]);
+      di.serial = pdns_stou(row[2]);
+      di.kind = DomainInfo::Native;
+      di.backend = this;
+
+      domains->push_back(di);
+    }
+
+    d_allDomainsQuery_stmt->
+      reset();
+  }
+  catch (SSqlException &e) {
+    throw PDNSException("MyDNSBackend unable to list all domains: "+e.txtReason());
+  }
 }
 
 class MyDNSFactory : public BackendFactory {
@@ -453,7 +489,7 @@ class MyDNSLoader {
 public:
   MyDNSLoader() {
     BackendMakers().report(new MyDNSFactory());
-    L << Logger::Info << "[mydnsbackend] This is the mydns backend version " VERSION
+    g_log << Logger::Info << "[mydnsbackend] This is the mydns backend version " VERSION
 #ifndef REPRODUCIBLE
       << " (" __DATE__ " " __TIME__ ")"
 #endif

@@ -10,34 +10,11 @@
 #include "statbag.hh"
 #include "base32.hh"
 #include "dnssecinfra.hh"
-#include <boost/foreach.hpp>
+
 #include "dns_random.hh"
 #include "gss_context.hh"
 
 StatBag S;
-
-bool validateTSIG(const string& message, const TSIGHashEnum& algo, const string& key, const string& secret, const TSIGRecordContent *trc) {
-  int64_t now = time(0);
-  if(abs((int64_t)trc->d_time - now) > trc->d_fudge) {
-    cerr<<"TSIG (key '"<<key<<"') time delta "<< abs(trc->d_time - now)<<" > 'fudge' "<<trc->d_fudge<<endl;
-    return false;
-  }
-  if (algo == TSIG_GSS) {
-    // authorization is done later
-    GssContext gssctx(key);
-    if (!gssctx.valid()) {
-      cerr<<"no context"<<endl;
-      return false;
-    }
-    if (!gssctx.verify(message, trc->d_mac)) {
-      cerr<<"invalid mac"<<endl;
-      return false;
-    }
-    return true;
-  }
-  return calculateHMAC(secret, message, algo) == trc->d_mac;
-}
-
 
 int main(int argc, char** argv)
 try
@@ -106,7 +83,6 @@ try
   }
 
   reportAllTypes();
-  dns_random_init("0123456789abcdef");
 
   vector<uint8_t> packet;
   uint16_t len;
@@ -128,7 +104,7 @@ try
       input="";
       DNSPacketWriter pwtkey(packet, gssctx.getLabel(), QType::TKEY, QClass::ANY);
       TKEYRecordContent tkrc;
-      tkrc.d_algo = "gss-tsig";
+      tkrc.d_algo = DNSName("gss-tsig.");
       tkrc.d_inception = time((time_t*)NULL);
       tkrc.d_expiration = tkrc.d_inception+15;
       tkrc.d_mode = 3;
@@ -137,10 +113,10 @@ try
       tkrc.d_key = output;
       tkrc.d_othersize = 0;
       pwtkey.getHeader()->id = dns_random(0xffff);
-      pwtkey.startRecord(gssctx.getLabel(), QType::TKEY, 3600, QClass::ANY, DNSPacketWriter::ADDITIONAL, false);
+      pwtkey.startRecord(gssctx.getLabel(), QType::TKEY, 3600, QClass::ANY, DNSResourceRecord::ADDITIONAL, false);
       tkrc.toPacket(pwtkey);
       pwtkey.commit();
-      BOOST_FOREACH(const string& msg, gssctx.getErrorStrings()) {
+      for(const string& msg :  gssctx.getErrorStrings()) {
         cerr<<msg<<endl;
       }
 
@@ -162,9 +138,9 @@ try
         n+=numread;
       }
 
-       MOADNSParser mdp(string(creply, len));
+      MOADNSParser mdp(false, string(creply, len));
        if (mdp.d_header.rcode != 0) {
-         throw PDNSException(string("Remote server refused: ") + boost::lexical_cast<string>(mdp.d_header.rcode));
+         throw PDNSException(string("Remote server refused: ") + std::to_string(mdp.d_header.rcode));
        }
        for(MOADNSParser::answers_t::const_iterator i=mdp.d_answers.begin(); i!=mdp.d_answers.end(); ++i) {
          if(i->first.d_type != QType::TKEY) continue;
@@ -194,7 +170,7 @@ try
     trc.d_fudge = 300;
     trc.d_origID=ntohs(pw.getHeader()->id);
     trc.d_eRcode=0;
-    addTSIG(pw, &trc, tsig_key, tsig_secret, "", false);
+    addTSIG(pw, trc, tsig_key, tsig_secret, "", false);
   }
 
   len = htons(packet.size());
@@ -227,11 +203,9 @@ try
       n+=numread;
     }
 
-    string packet = string(creply, len);
-
-    MOADNSParser mdp(packet);
+    MOADNSParser mdp(false, string(creply, len));
     if (mdp.d_header.rcode != 0) {
-      throw PDNSException(string("Remote server refused: ") + boost::lexical_cast<string>(mdp.d_header.rcode));
+      throw PDNSException(string("Remote server refused: ") + std::to_string(mdp.d_header.rcode));
     }
     for(MOADNSParser::answers_t::const_iterator i=mdp.d_answers.begin(); i!=mdp.d_answers.end(); ++i) {
       if (i->first.d_type == QType::TSIG) {

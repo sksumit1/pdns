@@ -1,16 +1,40 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+/*
+ * NOTE: sys/devpoll.h relies on sigset_t being already defined so we need
+ * to include sys/signal.h *before* including sys/devpoll.h.
+ */
+#include <sys/signal.h>
 #include <sys/devpoll.h>
 #include "mplexer.hh"
 #include "sstuff.hh"
 #include <iostream>
 #include <unistd.h>
 #include "misc.hh"
-#include <boost/lexical_cast.hpp>
 #include "syncres.hh"
 
-#include "namespaces.hh"
 #include "namespaces.hh"
 
 class DevPollFDMultiplexer : public FDMultiplexer
@@ -22,11 +46,12 @@ public:
     close(d_devpollfd);
   }
 
-  virtual int run(struct timeval* tv);
+  virtual int run(struct timeval* tv, int timeout=500) override;
+  virtual void getAvailableFDs(std::vector<int>& fds, int timeout) override;
 
-  virtual void addFD(callbackmap_t& cbmap, int fd, callbackfunc_t toDo, const funcparam_t& parameter);
-  virtual void removeFD(callbackmap_t& cbmap, int fd);
-  string getName()
+  virtual void addFD(callbackmap_t& cbmap, int fd, callbackfunc_t toDo, const funcparam_t& parameter) override;
+  virtual void removeFD(callbackmap_t& cbmap, int fd) override;
+  string getName() const override
   {
     return "/dev/poll";
   }
@@ -75,7 +100,7 @@ void DevPollFDMultiplexer::addFD(callbackmap_t& cbmap, int fd, callbackfunc_t to
 void DevPollFDMultiplexer::removeFD(callbackmap_t& cbmap, int fd)
 {
   if(!cbmap.erase(fd))
-    throw FDMultiplexerException("Tried to remove unlisted fd "+lexical_cast<string>(fd)+ " from multiplexer");
+    throw FDMultiplexerException("Tried to remove unlisted fd "+std::to_string(fd)+ " from multiplexer");
 
   struct pollfd devent;
   devent.fd=fd;
@@ -88,7 +113,27 @@ void DevPollFDMultiplexer::removeFD(callbackmap_t& cbmap, int fd)
   }
 }
 
-int DevPollFDMultiplexer::run(struct timeval* now)
+void DevPollFDMultiplexer::getAvailableFDs(std::vector<int>& fds, int timeout)
+{
+  struct dvpoll dvp;
+  dvp.dp_nfds = d_readCallbacks.size() + d_writeCallbacks.size();
+  dvp.dp_fds = new pollfd[dvp.dp_nfds];
+  dvp.dp_timeout = timeout;
+  int ret=ioctl(d_devpollfd, DP_POLL, &dvp);
+
+  if(ret < 0 && errno!=EINTR) {
+    delete[] dvp.dp_fds;
+    throw FDMultiplexerException("/dev/poll returned error: "+stringerror());
+  }
+
+  for(int n=0; n < ret; ++n) {
+    fds.push_back(dvp.dp_fds[n].fd);
+  }
+
+  delete[] dvp.dp_fds;
+}
+
+int DevPollFDMultiplexer::run(struct timeval* now, int timeout)
 {
   if(d_inrun) {
     throw FDMultiplexerException("FDMultiplexer::run() is not reentrant!\n");
@@ -96,15 +141,19 @@ int DevPollFDMultiplexer::run(struct timeval* now)
   struct dvpoll dvp;
   dvp.dp_nfds = d_readCallbacks.size() + d_writeCallbacks.size();
   dvp.dp_fds = new pollfd[dvp.dp_nfds];
-  dvp.dp_timeout = 500;
-  int ret=ioctl(d_devpollfd, DP_POLL, &dvp); 
+  dvp.dp_timeout = timeout;
+  int ret=ioctl(d_devpollfd, DP_POLL, &dvp);
   gettimeofday(now,0); // MANDATORY!
-  
-  if(ret < 0 && errno!=EINTR)
-    throw FDMultiplexerException("/dev/poll returned error: "+stringerror());
 
-  if(ret < 1) // thanks AB!
+  if(ret < 0 && errno!=EINTR) {
+    delete[] dvp.dp_fds;
+    throw FDMultiplexerException("/dev/poll returned error: "+stringerror());
+  }
+
+  if(ret < 1) { // thanks AB!
+    delete[] dvp.dp_fds;
     return 0;
+  }
 
   d_inrun=true;
   for(int n=0; n < ret; ++n) {
@@ -122,7 +171,7 @@ int DevPollFDMultiplexer::run(struct timeval* now)
   }
   delete[] dvp.dp_fds;
   d_inrun=false;
-  return 0;
+  return ret;
 }
 
 #if 0

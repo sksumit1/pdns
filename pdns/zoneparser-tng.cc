@@ -1,28 +1,28 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2005 - 2008  PowerDNS.COM BV
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2 
-    as published by the Free Software Foundation
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
-
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
+#include "ascii.hh"
 #include "dnsparser.hh"
 #include "sstuff.hh"
 #include "misc.hh"
@@ -34,29 +34,32 @@
 #include "zoneparser-tng.hh"
 #include <deque>
 #include <boost/algorithm/string.hpp>
-#include <boost/lexical_cast.hpp>
+#include <system_error>
+
+static string g_INstr("IN");
 
 ZoneParserTNG::ZoneParserTNG(const string& fname, const DNSName& zname, const string& reldir) : d_reldir(reldir), 
                                                                                                d_zonename(zname), d_defaultttl(3600), 
-                                                                                               d_havedollarttl(false)
-{
+                                                                                               d_templatecounter(0), d_templatestop(0),
+                                                                                               d_templatestep(0), d_havedollarttl(false){
   stackFile(fname);
 }
 
 ZoneParserTNG::ZoneParserTNG(const vector<string> zonedata, const DNSName& zname):
-                                                                        d_zonename(zname), d_defaultttl(3600), 
-                                                                        d_havedollarttl(false)
+  d_zonename(zname), d_zonedata(zonedata), d_defaultttl(3600),
+  d_templatecounter(0), d_templatestop(0), d_templatestep(0),
+  d_havedollarttl(false), d_fromfile(false)
 {
-  d_zonedata = zonedata;
   d_zonedataline = d_zonedata.begin();
-  d_fromfile = false;
 }
 
 void ZoneParserTNG::stackFile(const std::string& fname)
 {
   FILE *fp=fopen(fname.c_str(), "r");
-  if(!fp)
-    throw runtime_error("Unable to open file '"+fname+"': "+stringerror());
+  if(!fp) {
+    std::error_code ec (errno,std::generic_category());
+    throw std::system_error(ec, "Unable to open file '"+fname+"': "+stringerror());
+  }
 
   filestate fs(fp, fname);
   d_filestates.push(fs);
@@ -97,25 +100,32 @@ unsigned int ZoneParserTNG::makeTTLFromZone(const string& str)
   if(str.empty())
     return 0;
 
-  unsigned int val=atoi(str.c_str());
-  char lc=toupper(str[str.length()-1]);
+  unsigned int val;
+  try {
+    val=pdns_stou(str);
+  }
+  catch (const std::out_of_range& oor) {
+    throw PDNSException("Unable to parse time specification '"+str+"' "+getLineOfFile());
+  }
+
+  char lc=dns_tolower(str[str.length()-1]);
   if(!isdigit(lc))
     switch(lc) {
-    case 'S':
+    case 's':
       break;
-    case 'M':
+    case 'm':
       val*=60; // minutes, not months!
       break;
-    case 'H':
+    case 'h':
       val*=3600;
       break;
-    case 'D':
+    case 'd':
       val*=3600*24;
       break;
-    case 'W':
+    case 'w':
       val*=3600*24*7;
       break;
-    case 'Y': // ? :-)
+    case 'y': // ? :-)
       val*=3600*24*365;
       break;
 
@@ -138,7 +148,7 @@ bool ZoneParserTNG::getTemplateLine()
     string part=makeString(d_templateline, *iter);
     
     /* a part can contain a 'naked' $, an escaped $ (\$), or ${offset,width,radix}, with width defaulting to 0, 
-       and radix beging 'd', 'o', 'x' or 'X', defaulting to 'd'. 
+       and radix being 'd', 'o', 'x' or 'X', defaulting to 'd'. 
 
        The width is zero-padded, so if the counter is at 1, the offset is 15, with is 3, and the radix is 'x',
        output will be '010', from the input of ${15,3,x}
@@ -162,7 +172,7 @@ bool ZoneParserTNG::getTemplateLine()
       }
       if(c=='$') {
         if(pos + 1 == part.size() || part[pos+1]!='{') {  // a trailing $, or not followed by {
-          outpart.append(lexical_cast<string>(d_templatecounter));
+          outpart.append(std::to_string(d_templatecounter));
           continue;
         }
         
@@ -183,11 +193,11 @@ bool ZoneParserTNG::getTemplateLine()
         char radix='d';
         sscanf(spec.c_str(), "%d,%d,%c", &offset, &width, &radix);  // parse format specifier
 
-        char format[12];
-        snprintf(format, sizeof(format) - 1, "%%0%d%c", width, radix); // make into printf-style format
+        char sformat[12];
+        snprintf(sformat, sizeof(sformat), "%%0%d%c", width, radix); // make into printf-style format
 
         char tmp[80];
-        snprintf(tmp, sizeof(tmp)-1, format, d_templatecounter + offset); // and do the actual printing
+        snprintf(tmp, sizeof(tmp), sformat, d_templatecounter + offset); // and do the actual printing
         outpart+=tmp;
       }
       else
@@ -203,6 +213,8 @@ bool ZoneParserTNG::getTemplateLine()
 
 void chopComment(string& line)
 {
+  if(line.find(';')==string::npos)
+    return;
   string::size_type pos, len = line.length();
   bool inQuote=false;
   for(pos = 0 ; pos < len; ++pos) {
@@ -236,22 +248,37 @@ bool findAndElide(string& line, char c)
   return false;
 }
 
+DNSName ZoneParserTNG::getZoneName()
+{
+  return d_zonename;
+}
+
 string ZoneParserTNG::getLineOfFile()
 {
   if (d_zonedata.size() > 0)
-    return "on line "+lexical_cast<string>(std::distance(d_zonedata.begin(), d_zonedataline))+" of given string";
+    return "on line "+std::to_string(std::distance(d_zonedata.begin(), d_zonedataline))+" of given string";
 
-  return "on line "+lexical_cast<string>(d_filestates.top().d_lineno)+" of file '"+d_filestates.top().d_filename+"'";
+  if (d_filestates.empty())
+    return "";
+
+  return "on line "+std::to_string(d_filestates.top().d_lineno)+" of file '"+d_filestates.top().d_filename+"'";
 }
 
-// ODD: this function never fills out the prio field! rest of pdns compensates though
-bool ZoneParserTNG::get(DNSResourceRecord& rr, std::string* comment) 
+pair<string,int> ZoneParserTNG::getLineNumAndFile()
+{
+  if (d_filestates.empty())
+    return {"", 0};
+  else
+    return {d_filestates.top().d_filename, d_filestates.top().d_lineno};
+}
+
+bool ZoneParserTNG::get(DNSResourceRecord& rr, std::string* comment)
 {
  retry:;
   if(!getTemplateLine() && !getLine())
     return false;
 
-  boost::trim_right_if(d_line, is_any_of(" \r\n\x1a"));
+  boost::trim_right_if(d_line, is_any_of(" \t\r\n\x1a"));
   if(comment)
     comment->clear();
   if(comment && d_line.find(';') != string::npos)
@@ -262,7 +289,7 @@ bool ZoneParserTNG::get(DNSResourceRecord& rr, std::string* comment)
   if(parts.empty())
     goto retry;
 
-  if(parts[0].first != parts[0].second && makeString(d_line, parts[0])[0]==';') // line consisting of nothing but comments
+  if(parts[0].first != parts[0].second && d_line[parts[0].first]==';') // line consisting of nothing but comments
     goto retry;
 
   if(d_line[0]=='$') { 
@@ -285,7 +312,7 @@ bool ZoneParserTNG::get(DNSResourceRecord& rr, std::string* comment)
       string range=makeString(d_line, parts[1]);
       d_templatestep=1;
       d_templatestop=0;
-      sscanf(range.c_str(),"%d-%d/%d", &d_templatecounter, &d_templatestop, &d_templatestep);
+      sscanf(range.c_str(),"%u-%u/%u", &d_templatecounter, &d_templatestop, &d_templatestep);
       d_templateline=d_line;
       parts.pop_front();
       parts.pop_front();
@@ -300,7 +327,7 @@ bool ZoneParserTNG::get(DNSResourceRecord& rr, std::string* comment)
 
   bool prevqname=false;
   string qname = makeString(d_line, parts[0]); // Don't use DNSName here!
-  if(isspace(d_line[0])) {
+  if(dns_isspace(d_line[0])) {
     rr.qname=d_prevqname;
     prevqname=true;
   }else {
@@ -336,13 +363,15 @@ bool ZoneParserTNG::get(DNSResourceRecord& rr, std::string* comment)
     }
 
     // cout<<"Next part: '"<<nextpart<<"'"<<endl;
-    
-    if(pdns_iequals(nextpart, "IN")) {
+
+    if(pdns_iequals(nextpart, g_INstr)) {
       // cout<<"Ignoring 'IN'\n";
       continue;
     }
     if(!haveTTL && !haveQTYPE && isTimeSpec(nextpart)) {
       rr.ttl=makeTTLFromZone(nextpart);
+      if(!d_havedollarttl)
+        d_defaultttl = rr.ttl;
       haveTTL=true;
       // cout<<"ttl is probably: "<<rr.ttl<<endl;
       continue;
@@ -365,13 +394,13 @@ bool ZoneParserTNG::get(DNSResourceRecord& rr, std::string* comment)
   if(!haveQTYPE) 
     throw exception("Malformed line "+getLineOfFile()+": '"+d_line+"'");
 
-  rr.content=d_line.substr(range.first);
-
+  //  rr.content=d_line.substr(range.first);
+  rr.content.assign(d_line, range.first, string::npos);
   chopComment(rr.content);
-  trim(rr.content);
+  trim_if(rr.content, is_any_of(" \r\n\t\x1a"));
 
-  if(equals(rr.content, "@"))
-    rr.content=d_zonename.toStringNoDot();
+  if(rr.content.size()==1 && rr.content[0]=='@')
+    rr.content=d_zonename.toString();
 
   if(findAndElide(rr.content, '(')) {      // have found a ( and elided it
     if(!findAndElide(rr.content, ')')) {
@@ -387,14 +416,20 @@ bool ZoneParserTNG::get(DNSResourceRecord& rr, std::string* comment)
       }
     }
   }
+  trim_if(rr.content, is_any_of(" \r\n\t\x1a"));
 
   vector<string> recparts;
   switch(rr.qtype.getCode()) {
   case QType::MX:
     stringtok(recparts, rr.content);
     if(recparts.size()==2) {
-      if (recparts[1]!=".")
-        recparts[1] = toCanonic(d_zonename, recparts[1]).toStringNoDot();
+      if (recparts[1]!=".") {
+        try {
+          recparts[1] = toCanonic(d_zonename, recparts[1]).toStringRootDot();
+        } catch (std::exception &e) {
+          throw PDNSException("Error in record '" + rr.qname.toLogString() + " " + rr.qtype.getName() + "': " + e.what());
+        }
+      }
       rr.content=recparts[0]+" "+recparts[1];
     }
     break;
@@ -402,8 +437,8 @@ bool ZoneParserTNG::get(DNSResourceRecord& rr, std::string* comment)
   case QType::RP:
     stringtok(recparts, rr.content);
     if(recparts.size()==2) {
-      recparts[0] = toCanonic(d_zonename, recparts[0]).toStringNoDot();
-      recparts[1] = toCanonic(d_zonename, recparts[1]).toStringNoDot();
+      recparts[0] = toCanonic(d_zonename, recparts[0]).toStringRootDot();
+      recparts[1] = toCanonic(d_zonename, recparts[1]).toStringRootDot();
       rr.content=recparts[0]+" "+recparts[1];
     }
     break;
@@ -411,8 +446,13 @@ bool ZoneParserTNG::get(DNSResourceRecord& rr, std::string* comment)
   case QType::SRV:
     stringtok(recparts, rr.content);
     if(recparts.size()==4) {
-      if(recparts[3]!=".")
-        recparts[3] = toCanonic(d_zonename, recparts[3]).toStringNoDot();
+      if(recparts[3]!=".") {
+        try {
+          recparts[3] = toCanonic(d_zonename, recparts[3]).toStringRootDot();
+        } catch (std::exception &e) {
+          throw PDNSException("Error in record '" + rr.qname.toLogString() + " " + rr.qtype.getName() + "': " + e.what());
+        }
+      }
       rr.content=recparts[0]+" "+recparts[1]+" "+recparts[2]+" "+recparts[3];
     }
     break;
@@ -422,15 +462,42 @@ bool ZoneParserTNG::get(DNSResourceRecord& rr, std::string* comment)
   case QType::CNAME:
   case QType::DNAME:
   case QType::PTR:
-  case QType::AFSDB:
-    rr.content=toCanonic(d_zonename, rr.content).toStringNoDot();
+    try {
+      rr.content = toCanonic(d_zonename, rr.content).toStringRootDot();
+    } catch (std::exception &e) {
+      throw PDNSException("Error in record '" + rr.qname.toLogString() + " " + rr.qtype.getName() + "': " + e.what());
+    }
     break;
+  case QType::AFSDB:
+    stringtok(recparts, rr.content);
+    if(recparts.size() == 2) {
+      try {
+        recparts[1]=toCanonic(d_zonename, recparts[1]).toStringRootDot();
+      } catch (std::exception &e) {
+        throw PDNSException("Error in record '" + rr.qname.toLogString() + " " + rr.qtype.getName() + "': " + e.what());
+      }
+    } else {
+      throw PDNSException("AFSDB record for "+rr.qname.toLogString()+" invalid");
+    }
+    rr.content.clear();
+    for(string::size_type n = 0; n < recparts.size(); ++n) {
+      if(n)
+        rr.content.append(1,' ');
 
+      rr.content+=recparts[n];
+    }
+    break;
   case QType::SOA:
     stringtok(recparts, rr.content);
+    if(recparts.size() > 7)
+      throw PDNSException("SOA record contents for "+rr.qname.toLogString()+" contains too many parts");
     if(recparts.size() > 1) {
-      recparts[0]=toCanonic(d_zonename, recparts[0]).toStringNoDot();
-      recparts[1]=toCanonic(d_zonename, recparts[1]).toStringNoDot();
+      try {
+        recparts[0]=toCanonic(d_zonename, recparts[0]).toStringRootDot();
+        recparts[1]=toCanonic(d_zonename, recparts[1]).toStringRootDot();
+      } catch (std::exception &e) {
+        throw PDNSException("Error in record '" + rr.qname.toLogString() + " " + rr.qtype.getName() + "': " + e.what());
+      }
     }
     rr.content.clear();
     for(string::size_type n = 0; n < recparts.size(); ++n) {
@@ -438,18 +505,13 @@ bool ZoneParserTNG::get(DNSResourceRecord& rr, std::string* comment)
         rr.content.append(1,' ');
 
       if(n > 1)
-        rr.content+=lexical_cast<string>(makeTTLFromZone(recparts[n]));
+        rr.content+=std::to_string(makeTTLFromZone(recparts[n]));
       else
         rr.content+=recparts[n];
-
-      if(n==6 && !d_havedollarttl)
-        d_defaultttl=makeTTLFromZone(recparts[n]);
     }
     break;
   default:;
   }
-
-  rr.d_place=DNSResourceRecord::ANSWER;
   return true;
 }
 
@@ -459,7 +521,7 @@ bool ZoneParserTNG::getLine()
   if (d_zonedata.size() > 0) {
     if (d_zonedataline != d_zonedata.end()) {
       d_line = *d_zonedataline;
-      d_zonedataline++;
+      ++d_zonedataline;
       return true;
     }
     return false;

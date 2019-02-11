@@ -1,56 +1,75 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
-#include "remotebackend.hh"
+#include <sys/types.h>
 #include <sys/socket.h>
-#include "pdns/lock.hh" 
-#include <unistd.h>
-#include <fcntl.h>
+#include <sys/un.h>
+#include "remotebackend.hh"
 #ifndef UNIX_PATH_MAX 
 #define UNIX_PATH_MAX 108
 #endif
 
-UnixsocketConnector::UnixsocketConnector(std::map<std::string,std::string> options) {
-  if (options.count("path") == 0) {
-    L<<Logger::Error<<"Cannot find 'path' option in connection string"<<endl;
+UnixsocketConnector::UnixsocketConnector(std::map<std::string,std::string> optionsMap) {
+  if (optionsMap.count("path") == 0) {
+    g_log<<Logger::Error<<"Cannot find 'path' option in connection string"<<endl;
     throw PDNSException();
   } 
   this->timeout = 2000;
-  if (options.find("timeout") != options.end()) { 
-    this->timeout = boost::lexical_cast<int>(options.find("timeout")->second);
+  if (optionsMap.find("timeout") != optionsMap.end()) {
+    this->timeout = std::stoi(optionsMap.find("timeout")->second);
   }
-  this->path = options.find("path")->second;
-  this->options = options;
+  this->path = optionsMap.find("path")->second;
+  this->options = optionsMap;
   this->connected = false;
   this->fd = -1;
 }
 
 UnixsocketConnector::~UnixsocketConnector() {
   if (this->connected) {
-     L<<Logger::Info<<"closing socket connection"<<endl;
-     close(fd);
+    try {
+      g_log<<Logger::Info<<"closing socket connection"<<endl;
+    }
+    catch (...) {
+    }
+    close(fd);
   }
 }
 
-int UnixsocketConnector::send_message(const rapidjson::Document &input) {
-  std::string data;
-  int rv;
-  data = makeStringFromDocument(input);
-  data = data + "\n";
-  rv = this->write(data);
+int UnixsocketConnector::send_message(const Json& input) {
+  auto data = input.dump() + "\n";
+  int rv = this->write(data);
   if (rv == -1)
     return -1;
   return rv;
 }
 
-int UnixsocketConnector::recv_message(rapidjson::Document &output) {
-  int rv,nread;
-  std::string s_output;
-  rapidjson::GenericReader<rapidjson::UTF8<> , rapidjson::MemoryPoolAllocator<> > r;
+int UnixsocketConnector::recv_message(Json& output) {
+  int rv;
+  std::string s_output,err;
 
   struct timeval t0,t;
 
-  nread = 0;
   gettimeofday(&t0, NULL);
   memcpy(&t,&t0,sizeof(t0));
   s_output = "";       
@@ -64,20 +83,14 @@ int UnixsocketConnector::recv_message(rapidjson::Document &output) {
       continue;
     }
 
-    std::string temp;
-    temp.clear();
-
-    rv = this->read(temp);
+    rv = this->read(s_output);
     if (rv == -1) 
       return -1;
 
     if (rv>0) {
-      nread += rv;
-      s_output.append(temp);
-      rapidjson::StringStream ss(s_output.c_str());
-      output.ParseStream<0>(ss); 
-      if (output.HasParseError() == false)
-        return s_output.size();
+      // see if it can be parsed
+      output = Json::parse(s_output, err);
+      if (output != nullptr) return s_output.size();
     }
     gettimeofday(&t, NULL);
   }
@@ -98,7 +111,7 @@ ssize_t UnixsocketConnector::read(std::string &data) {
   // just try again later...
   if (nread==-1 && errno == EAGAIN) return 0;
 
-  if (nread==-1) {
+  if (nread==-1 || nread==0) {
     connected = false;
     close(fd);
     return -1;
@@ -109,73 +122,64 @@ ssize_t UnixsocketConnector::read(std::string &data) {
 }
 
 ssize_t UnixsocketConnector::write(const std::string &data) {
-  ssize_t nwrite, nbuf;
-  size_t pos;
-  char buf[1500];
+  size_t pos = 0;
 
   reconnect();
   if (!connected) return -1;
-  pos = 0;
-  nwrite = 0;
+
   while(pos < data.size()) {
-    nbuf = data.copy(buf, sizeof buf, pos); // copy data and write
-    nwrite = ::write(fd, buf, nbuf);
-    pos = pos + sizeof(buf);
-    if (nwrite < 1) {
+    ssize_t written = ::write(fd, &data.at(pos), data.size() - pos);
+    if (written < 1) {
       connected = false;
       close(fd);
       return -1;
+    } else {
+      pos = pos + static_cast<size_t>(written);
     }
   }
-  return nwrite;
+  return pos;
 }
 
 void UnixsocketConnector::reconnect() {
   struct sockaddr_un sock;
-  rapidjson::Document init,res;
-  rapidjson::Value val;
   int rv;
 
   if (connected) return; // no point reconnecting if connected...
   connected = true;
 
-  L<<Logger::Info<<"Reconnecting to backend" << std::endl;
+  g_log<<Logger::Info<<"Reconnecting to backend" << std::endl;
   fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0) {
      connected = false;
-     L<<Logger::Error<<"Cannot create socket: " << strerror(errno) << std::endl;;
+     g_log<<Logger::Error<<"Cannot create socket: " << strerror(errno) << std::endl;;
      return;
   }
 
   if (makeUNsockaddr(path, &sock)) {
-     L<<Logger::Error<<"Unable to create UNIX domain socket: Path '"<<path<<"' is not a valid UNIX socket path."<<std::endl;
+     g_log<<Logger::Error<<"Unable to create UNIX domain socket: Path '"<<path<<"' is not a valid UNIX socket path."<<std::endl;
      return;
   }
 
   rv = connect(fd, reinterpret_cast<struct sockaddr*>(&sock), sizeof sock);
 
   if (rv != 0 && errno != EISCONN && errno != 0) {
-     L<<Logger::Error<<"Cannot connect to socket: " << strerror(errno) << std::endl;
+     g_log<<Logger::Error<<"Cannot connect to socket: " << strerror(errno) << std::endl;
      close(fd);
      connected = false;
      return;
   }
   // send initialize
 
-  init.SetObject();
-  val = "initialize";
-  init.AddMember("method",val, init.GetAllocator());
-  val.SetObject();
-  init.AddMember("parameters", val, init.GetAllocator());
+  Json::array parameters;
+  Json msg = Json(Json::object{
+    { "method", "initialize" },
+    { "parameters", Json(options) },
+  });
 
-  for(std::map<std::string,std::string>::iterator i = options.begin(); i != options.end(); i++) {
-    val = i->second.c_str();
-    init["parameters"].AddMember(i->first.c_str(), val, init.GetAllocator());
-  } 
-
-  this->send_message(init);
-  if (this->recv_message(res) == false) {
-     L<<Logger::Warning << "Failed to initialize backend" << std::endl;
+  this->send(msg);
+  msg = nullptr;
+  if (this->recv(msg) == false) {
+     g_log<<Logger::Warning << "Failed to initialize backend" << std::endl;
      close(fd);
      this->connected = false;
   }

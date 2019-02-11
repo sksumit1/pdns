@@ -1,24 +1,25 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2002 - 2011  PowerDNS.COM BV
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2
-    as published by the Free Software Foundation
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
 /* accepts a named.conf or a zone as parameter and outputs heaps of sql */
 
 #ifdef HAVE_CONFIG_H
@@ -30,8 +31,8 @@
 
 #include <iostream>
 #include <stdio.h>
+#include "json11.hpp"
 #include "namespaces.hh"
-#include "json.hh"
 #include "dns.hh"
 #include "arguments.hh"
 #include "bindparserclasses.hh"
@@ -44,11 +45,10 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <boost/foreach.hpp>
+
 
 
 StatBag S;
-static bool g_doDNSSEC;
 
 enum dbmode_t {MYSQL, GORACLE, POSTGRES, SQLITE, MYDNS, ORACLE};
 static dbmode_t g_mode;
@@ -111,16 +111,17 @@ static void startNewTransaction()
     cout<<"BEGIN TRANSACTION;"<<endl;
 }
 
-static void emitDomain(const string& domain, const vector<string> *masters = 0) {
+static void emitDomain(const DNSName& domain, const vector<ComboAddress> *masters = 0) {
+  string iDomain = domain.toStringRootDot();
   if(!::arg().mustDo("slave")) {
     if(g_mode==POSTGRES || g_mode==MYSQL || g_mode==SQLITE) {
-      cout<<"insert into domains (name,type) values ("<<toLower(sqlstr(stripDot(domain)))<<",'NATIVE');"<<endl;
+      cout<<"insert into domains (name,type) values ("<<toLower(sqlstr(iDomain))<<",'NATIVE');"<<endl;
     }
     else if(g_mode==GORACLE) {
-      cout<<"insert into domains (id,name,type) values (domains_id_sequence.nextval,"<<toLower(sqlstr(domain))<<",'NATIVE');"<<endl;
+      cout<<"insert into domains (id,name,type) values (domains_id_sequence.nextval,"<<toLower(sqlstr(iDomain))<<",'NATIVE');"<<endl;
     }
     else if(g_mode==ORACLE) {
-      cout<<"INSERT INTO Zones (id, name, type) VALUES (zones_id_seq.nextval, "<<sqlstr(toLower(domain))<<", 'NATIVE');"<<endl;
+      cout<<"INSERT INTO Zones (id, name, type) VALUES (zones_id_seq.nextval, "<<sqlstr(toLower(iDomain))<<", 'NATIVE');"<<endl;
     }
   }
   else 
@@ -129,15 +130,15 @@ static void emitDomain(const string& domain, const vector<string> *masters = 0) 
     if(g_mode==POSTGRES || g_mode==MYSQL || g_mode==SQLITE) {
       string mstrs;
       if (masters != 0 && ! masters->empty()) {
-        BOOST_FOREACH(const string& mstr, *masters) {
-          mstrs.append(mstr);
+        for(const auto& mstr :  *masters) {
+          mstrs.append(mstr.toStringWithPortExcept(53));
           mstrs.append(1, ' ');
-        }                  
+        }
       }
       if (mstrs.empty())
-        cout<<"insert into domains (name,type) values ("<<sqlstr(domain)<<",'NATIVE');"<<endl;
+        cout<<"insert into domains (name,type) values ("<<sqlstr(iDomain)<<",'NATIVE');"<<endl;
       else
-        cout<<"insert into domains (name,type,master) values ("<<sqlstr(domain)<<",'SLAVE'"<<", '"<<mstrs<<"');"<<endl;
+        cout<<"insert into domains (name,type,master) values ("<<sqlstr(iDomain)<<",'SLAVE'"<<", '"<<mstrs<<"');"<<endl;
     }
     else if (g_mode == GORACLE || g_mode==ORACLE) {
       cerr<<"Slave import mode not supported with oracle."<<endl;
@@ -146,9 +147,10 @@ static void emitDomain(const string& domain, const vector<string> *masters = 0) 
 }
 
 bool g_doJSONComments;
-static void emitRecord(const string& zoneName, const DNSName &DNSqname, const string &qtype, const string &ocontent, int ttl, const string& comment="")
+static void emitRecord(const DNSName& zoneName, const DNSName &DNSqname, const string &qtype, const string &ocontent, int ttl, const string& comment="")
 {
-  string qname = stripDot(DNSqname.toString());
+  string qname = DNSqname.toStringRootDot();
+  string zname = zoneName.toStringRootDot();
   int prio=0;
   int disabled=0;
   string recordcomment;
@@ -157,12 +159,13 @@ static void emitRecord(const string& zoneName, const DNSName &DNSqname, const st
     string::size_type pos = comment.find("json={");
     if(pos!=string::npos) {
       string json = comment.substr(pos+5);
-      rapidjson::Document document;
-      if(document.Parse<0>(json.c_str()).HasParseError())
-        throw runtime_error("Could not parse JSON '"+json+"'");
+      string err;
+      auto document = json11::Json::parse(json, err);
+      if(document.is_null())
+        throw runtime_error("Could not parse JSON '"+json+"': " + err);
 
-      disabled=boolFromJson(document, "disabled", false);
-      recordcomment=stringFromJson(document, "comment", "");
+      disabled=document["disabled"].bool_value();
+      recordcomment=document["comment"].string_value();
     }
   }
 
@@ -173,7 +176,7 @@ static void emitRecord(const string& zoneName, const DNSName &DNSqname, const st
     return; // NSECs do not go in the database
 
   if((qtype == "MX" || qtype == "SRV") && g_mode!=ORACLE) {
-    prio=atoi(content.c_str());
+    prio=pdns_stou(content);
     
     string::size_type pos = content.find_first_not_of("0123456789");
     if(pos != string::npos)
@@ -182,66 +185,45 @@ static void emitRecord(const string& zoneName, const DNSName &DNSqname, const st
   }
 
   bool auth = true;
-  if(qtype == "NS" && !pdns_iequals(qname, zoneName)) {
+  if(qtype == "NS" && !pdns_iequals(qname, zname)) {
     auth=false;
   }
 
   if(g_mode==MYSQL || g_mode==SQLITE) {
-    if(!g_doDNSSEC) {
-      cout<<"insert into records (domain_id, name, type,content,ttl,prio,disabled) select id ,"<<
-        sqlstr(toLower(qname))<<", "<<
-        sqlstr(qtype)<<", "<<
-        sqlstr(stripDotContent(content))<<", "<<ttl<<", "<<prio<<", "<<disabled<<
-        " from domains where name="<<toLower(sqlstr(zoneName))<<";\n";
+    cout<<"insert into records (domain_id, name, type,content,ttl,prio,disabled) select id ,"<<
+      sqlstr(toLower(qname))<<", "<<
+      sqlstr(qtype)<<", "<<
+      sqlstr(stripDotContent(content))<<", "<<ttl<<", "<<prio<<", "<<disabled<<
+      " from domains where name="<<toLower(sqlstr(zname))<<";\n";
 
-      if(!recordcomment.empty()) {
-        cout<<"insert into comments (domain_id,name,type,modified_at, comment) select id, "<<toLower(sqlstr(stripDot(qname)))<<", "<<sqlstr(qtype)<<", "<<time(0)<<", "<<sqlstr(recordcomment)<<" from domains where name="<<toLower(sqlstr(zoneName))<<";\n";
-       
-      }
-
-    } else
-    {
-      cout<<"insert into records (domain_id, name, ordername, auth, type,content,ttl,prio,disabled) select id ,"<<
-        sqlstr(toLower(qname))<<", "<<
-        sqlstr(toLower(labelReverse(makeRelative(qname, zoneName))))<<", "<<auth<<", "<<
-        sqlstr(qtype)<<", "<<
-        sqlstr(stripDotContent(content))<<", "<<ttl<<", "<<prio<<", "<<disabled<<
-        " from domains where name="<<toLower(sqlstr(zoneName))<<";\n";
+    if(!recordcomment.empty()) {
+      cout<<"insert into comments (domain_id,name,type,modified_at, comment) select id, "<<toLower(sqlstr(stripDot(qname)))<<", "<<sqlstr(qtype)<<", "<<time(0)<<", "<<sqlstr(recordcomment)<<" from domains where name="<<toLower(sqlstr(zname))<<";\n";
     }
   }
   else if(g_mode==POSTGRES) {
-    if(!g_doDNSSEC) {
-      cout<<"insert into records (domain_id, name,type,content,ttl,prio,disabled) select id ,"<<
-        sqlstr(toLower(qname))<<", "<<
-        sqlstr(qtype)<<", "<<
-        sqlstr(stripDotContent(content))<<", "<<ttl<<", "<<prio<<", '"<< (disabled ? 't': 'f')<<
-        "' from domains where name="<<toLower(sqlstr(zoneName))<<";\n";
-    } else
-    {
-      cout<<"insert into records (domain_id, name, ordername, auth, type,content,ttl,prio,disabled) select id ,"<<
-        sqlstr(toLower(qname))<<", "<<
-        sqlstr(toLower(labelReverse(makeRelative(qname, zoneName))))<<", '"<< (auth  ? 't' : 'f') <<"', "<<
-        sqlstr(qtype)<<", "<<
-        sqlstr(stripDotContent(content))<<", "<<ttl<<", "<<prio<<", '"<<(disabled ? 't': 'f') <<
-        "' from domains where name="<<toLower(sqlstr(zoneName))<<";\n";
-    }
+    cout<<"insert into records (domain_id, name, ordername, auth, type,content,ttl,prio,disabled) select id ,"<<
+      sqlstr(toLower(qname))<<", "<<
+      sqlstr(DNSName(qname).makeRelative(DNSName(zname)).makeLowerCase().labelReverse().toString(" ", false))<<", '"<< (auth  ? 't' : 'f') <<"', "<<
+      sqlstr(qtype)<<", "<<
+      sqlstr(stripDotContent(content))<<", "<<ttl<<", "<<prio<<", '"<<(disabled ? 't': 'f') <<
+      "' from domains where name="<<toLower(sqlstr(zname))<<";\n";
   }
   else if(g_mode==GORACLE) {
     cout<<"insert into Records (id, domain_id, name, type, content, ttl, prio, disabled) select RECORDS_ID_SEQUENCE.nextval,id ,"<<
       sqlstr(toLower(qname))<<", "<<
       sqlstr(qtype)<<", "<<
       sqlstr(stripDotContent(content))<<", "<<ttl<<", "<<prio<<", "<<disabled<<
-      " from Domains where name="<<toLower(sqlstr(zoneName))<<";\n";
+      " from Domains where name="<<toLower(sqlstr(zname))<<";\n";
   }
   else if(g_mode==ORACLE) {
     cout<<"INSERT INTO Records (id, zone_id, fqdn, ttl, type, content) SELECT records_id_seq.nextval, id, "<<
       sqlstr(toLower(qname))<<", "<<
       ttl<<", "<<sqlstr(qtype)<<", "<<
       sqlstr(stripDotContent(content))<<
-      " FROM Zones WHERE name="<<toLower(sqlstr(zoneName))<<";"<<endl;
+      " FROM Zones WHERE name="<<toLower(sqlstr(zname))<<";"<<endl;
   }
   else if (g_mode == MYDNS) {
-    string zoneNameDot = zoneName + ".";
+    string zoneNameDot = zname + ".";
     if (qtype == "A" || qtype == "AAAA" || qtype == "CNAME" || qtype == "HINFO" || qtype == "MX" || qtype == "NAPTR" || 
         qtype == "NS" || qtype == "PTR" || qtype == "RP" || qtype == "SRV" || qtype == "TXT")
     {
@@ -259,8 +241,8 @@ static void emitRecord(const string& zoneName, const DNSName &DNSqname, const st
       stringtok(parts, content);
  
       cout<<"INSERT INTO soa(origin, ns, mbox, serial, refresh, retry, expire, minimum, ttl) VALUES("<<
-      sqlstr(toLower(zoneNameDot))<<", "<<sqlstr(parts[0])<<", "<<sqlstr(parts[1])<<", "<<atoi(parts[2].c_str())<<", "<<
-      atoi(parts[3].c_str())<<", "<<atoi(parts[4].c_str())<<", "<<atoi(parts[5].c_str())<<", "<<atoi(parts[6].c_str())<<", "<<ttl<<");\n";
+      sqlstr(toLower(zoneNameDot))<<", "<<sqlstr(parts[0])<<", "<<sqlstr(parts[1])<<", "<<pdns_stou(parts[2])<<", "<<
+      pdns_stou(parts[3])<<", "<<pdns_stou(parts[4])<<", "<<pdns_stou(parts[5])<<", "<<pdns_stou(parts[6])<<", "<<ttl<<");\n";
     }
     else
     {
@@ -285,10 +267,8 @@ int main(int argc, char **argv)
 try
 {
     reportAllTypes();
-#if __GNUC__ >= 3
     std::ios_base::sync_with_stdio(false);
-#endif
-   
+  
     ::arg().setSwitch("gpgsql","Output in format suitable for default gpgsqlbackend")="no";
     ::arg().setSwitch("gmysql","Output in format suitable for default gmysqlbackend")="no";
     ::arg().setSwitch("mydns","Output in format suitable for default mydnsbackend")="no";
@@ -296,7 +276,6 @@ try
     ::arg().setSwitch("oracle","Output in format suitable for the oraclebackend")="no";
     ::arg().setSwitch("gsqlite","Output in format suitable for default gsqlitebackend")="no";
     ::arg().setSwitch("verbose","Verbose comments on operation")="no";
-    ::arg().setSwitch("dnssec","Add DNSSEC related data")="no";
     ::arg().setSwitch("slave","Keep BIND slaves as slaves. Only works with named-conf.")="no";
     ::arg().setSwitch("json-comments","Parse json={} field for disabled & comments")="no";
     ::arg().setSwitch("transactions","If target SQL supports it, use transactions")="no";
@@ -312,6 +291,7 @@ try
     ::arg().set("soa-expire-default","Do not change")="0";
 
     ::arg().setCmd("help","Provide a helpful message");
+    ::arg().setCmd("version","Print the version");
 
     S.declare("logmessages");
 
@@ -319,6 +299,11 @@ try
     string zonefile="";
 
     ::arg().parse(argc, argv);
+
+    if(::arg().mustDo("version")) {
+      cerr<<"zone2sql "<<VERSION<<endl;
+      exit(0);
+    }
   
     if(::arg().mustDo("help")) {
       cout<<"syntax:"<<endl<<endl;
@@ -358,8 +343,6 @@ try
     if((g_mode==GORACLE || g_mode==ORACLE) && !::arg().mustDo("transactions"))
       cout<<"set autocommit on;"<<endl;
 
-    g_doDNSSEC=::arg().mustDo("dnssec");
-      
     namedfile=::arg()["named-conf"];
     zonefile=::arg()["zone"];
 
@@ -389,13 +372,13 @@ try
           ++i)
         {
           if(i->type!="master" && i->type!="slave") {
-            cerr<<" Warning! Skipping '"<<i->type<<"' zone '"<<i->name.toString()<<"'"<<endl;
+            cerr<<" Warning! Skipping '"<<i->type<<"' zone '"<<i->name<<"'"<<endl;
             continue;
           }
           try {
             startNewTransaction();
             
-            emitDomain(i->name.toStringNoDot(), &(i->masters));
+            emitDomain(i->name, &(i->masters));
             
             ZoneParserTNG zpt(i->filename, i->name, BP.getDirectory());
             DNSResourceRecord rr;
@@ -407,7 +390,7 @@ try
               if(rr.qtype.getCode() == QType::SOA)
                 seenSOA=true;
 
-              emitRecord(i->name.toStringNoDot(), rr.qname, rr.qtype.getName(), rr.content, rr.ttl, comment);
+              emitRecord(i->name, rr.qname, rr.qtype.getName(), rr.content, rr.ttl, comment);
             }
             num_domainsdone++;
           }
@@ -431,20 +414,32 @@ try
       cerr<<"\r100% done\033\133\113"<<endl;
     }
     else {
-      DNSName zonename(::arg()["zone-name"]);
+      DNSName zonename;
+      if(!::arg()["zone-name"].empty())
+        zonename = DNSName(::arg()["zone-name"]);
+
       ZoneParserTNG zpt(zonefile, zonename);
       DNSResourceRecord rr;
       startNewTransaction();
-      emitDomain(zonename.toStringNoDot());
       string comment;
       bool seenSOA=false;
+      bool haveEmittedZone = false;
       while(zpt.get(rr, &comment))  {
 	if(filterDupSOA && seenSOA && rr.qtype.getCode() == QType::SOA)
 	  continue;
 	if(rr.qtype.getCode() == QType::SOA)
 	  seenSOA=true;
+        if(!haveEmittedZone) {
+          if(!zpt.getZoneName().empty()){
+            emitDomain(zpt.getZoneName());
+            haveEmittedZone = true;
+          } else {
+            // We have no zonename yet, don't emit
+            continue;
+          }
+        }
 
-        emitRecord(zonename.toStringNoDot(), rr.qname, rr.qtype.getName(), rr.content, rr.ttl, comment);
+        emitRecord(zpt.getZoneName(), rr.qname, rr.qtype.getName(), rr.content, rr.ttl, comment);
       }
       num_domainsdone=1;
     }

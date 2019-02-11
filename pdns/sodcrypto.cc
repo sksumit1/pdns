@@ -1,3 +1,24 @@
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #include <iostream>
 #include "namespaces.hh"
 #include "misc.hh"
@@ -9,30 +30,61 @@
 
 string newKey()
 {
-  unsigned char key[crypto_secretbox_KEYBYTES];
-  randombytes_buf(key, sizeof key);
-  return "\""+Base64Encode(string((char*)key, sizeof key))+"\"";
+  std::string key;
+  key.resize(crypto_secretbox_KEYBYTES);
+
+  randombytes_buf(reinterpret_cast<unsigned char*>(&key.at(0)), key.size());
+
+  return "\""+Base64Encode(key)+"\"";
+}
+
+bool sodIsValidKey(const std::string& key)
+{
+  return key.size() == crypto_secretbox_KEYBYTES;
 }
 
 std::string sodEncryptSym(const std::string& msg, const std::string& key, SodiumNonce& nonce)
 {
-  unsigned char ciphertext[msg.length() + crypto_secretbox_MACBYTES];
-  crypto_secretbox_easy(ciphertext, (unsigned char*)msg.c_str(), msg.length(), nonce.value, (unsigned char*)key.c_str());
+  if (!sodIsValidKey(key)) {
+    throw std::runtime_error("Invalid encryption key of size " + std::to_string(key.size()) + ", use setKey() to set a valid key");
+  }
+
+  std::string ciphertext;
+  ciphertext.resize(msg.length() + crypto_secretbox_MACBYTES);
+  crypto_secretbox_easy(reinterpret_cast<unsigned char*>(&ciphertext.at(0)),
+                        reinterpret_cast<const unsigned char*>(msg.c_str()),
+                        msg.length(),
+                        nonce.value,
+                        reinterpret_cast<const unsigned char*>(key.c_str()));
 
   nonce.increment();
-  return string((char*)ciphertext, sizeof(ciphertext));
+  return ciphertext;
 }
 
 std::string sodDecryptSym(const std::string& msg, const std::string& key, SodiumNonce& nonce)
 {
-  unsigned char decrypted[msg.length() - crypto_secretbox_MACBYTES];
+  std::string decrypted;
 
-  if (crypto_secretbox_open_easy(decrypted, (const unsigned char*)msg.c_str(), 
-				 msg.length(), nonce.value, (const unsigned char*)key.c_str()) != 0) {
-    throw std::runtime_error("Could not decrypt message");
+  if (msg.length() < crypto_secretbox_MACBYTES) {
+    throw std::runtime_error("Could not decrypt message of size " + std::to_string(msg.length()));
   }
+
+  if (!sodIsValidKey(key)) {
+    throw std::runtime_error("Invalid decryption key of size " + std::to_string(key.size()) + ", use setKey() to set a valid key");
+  }
+
+  decrypted.resize(msg.length() - crypto_secretbox_MACBYTES);
+
+  if (crypto_secretbox_open_easy(reinterpret_cast<unsigned char*>(const_cast<char *>(decrypted.data())),
+                                 reinterpret_cast<const unsigned char*>(msg.c_str()),
+                                 msg.length(),
+                                 nonce.value,
+                                 reinterpret_cast<const unsigned char*>(key.c_str())) != 0) {
+    throw std::runtime_error("Could not decrypt message, please check that the key configured with setKey() is correct");
+  }
+
   nonce.increment();
-  return string((char*)decrypted, sizeof(decrypted));
+  return decrypted;
 }
 #else
 std::string sodEncryptSym(const std::string& msg, const std::string& key, SodiumNonce& nonce)
@@ -49,6 +101,10 @@ string newKey()
   return "\"plaintext\"";
 }
 
+bool sodIsValidKey(const std::string& key)
+{
+  return true;
+}
 
 #endif
 
@@ -219,9 +275,15 @@ int B64Decode(const std::string& strInput, std::string& strOutput)
     // Interpret the resulting 3 bytes...note there
     // may have been padding, so those padded bytes
     // are actually ignored.
+#if BYTE_ORDER == BIG_ENDIAN
+    strOutput += pBuf[sizeof(long)-3];
+    strOutput += pBuf[sizeof(long)-2];
+    strOutput += pBuf[sizeof(long)-1];
+#else
     strOutput += pBuf[2];
     strOutput += pBuf[1];
     strOutput += pBuf[0];
+#endif
   } // while
   if(pad)
     strOutput.resize(strOutput.length()-pad);

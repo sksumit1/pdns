@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+PDNSCONTROL=${PDNSCONTROL:-${PWD}/../../../pdns/pdns_control}
+$PDNSCONTROL --config-dir=./ --socket-dir=./ $@

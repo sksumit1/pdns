@@ -1,6 +1,24 @@
-/* Copyright 2005 Netherlabs BV, bert.hubert@netherlabs.nl. See LICENSE
-   for more information. */
-
+/*
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -11,7 +29,7 @@
 #include "pdns/logger.hh"
 #include "pdns/dns.hh"
 #include "pdns/namespaces.hh"
-#include "pdns/md5.hh"
+#include "pdns/digests.hh"
 
 static AtomicCounter s_txid;
 
@@ -34,53 +52,21 @@ public:
     d_non_null_ind = 0;
     d_null_ind = -1;
     d_init = false;
-
-    if (query.size() == 0) return;
-
+    d_prepared = false;
+    d_parnum = nparams;
     // create a key
-    string key = pdns_md5sum(query);
+    string key = pdns_md5sum(d_query);
     d_stmt_keysize = std::min(key.size()*2, sizeof(d_stmt_key));
     for(string::size_type i = 0; i < key.size() && i*2 < d_stmt_keysize; i++)
       snprintf((char*)&(d_stmt_key[i*2]), 3, "%02x", (unsigned char)key[i]);
     d_stmt_key[d_stmt_keysize] = 0;
-
-    if (OCIHandleAlloc(d_ctx, (dvoid**)&d_err, OCI_HTYPE_ERROR, 0, NULL)) 
-      throw SSqlException("Cannot allocate statement error handle");
-
-    if (d_release_stmt) {
-      if (OCIStmtPrepare2(d_svcctx, &d_stmt, d_err, (text*)query.c_str(), query.size(), NULL, 0, OCI_NTV_SYNTAX, OCI_DEFAULT) != OCI_SUCCESS) {
-        // failed.
-        throw SSqlException("Cannot prepare statement: " + d_query + string(": ") + OCIErrStr());
-      }
-      d_init = true;
-    } else d_init = false;
-    
-    d_parnum = nparams;
-    d_bind = new struct obind[d_parnum];
-    memset(d_bind, 0, sizeof(struct obind)*d_parnum);
-    // and we are done.
   }
 
-  void prepareStatement() {
-    if (d_stmt) return; // no-op 
-    if (d_query.size()==0) return;
-    if (d_init == false) {
-      if (OCIStmtPrepare2(d_svcctx, &d_stmt, d_err, (text*)d_query.c_str(), d_query.size(), NULL, 0, OCI_NTV_SYNTAX, OCI_DEFAULT) != OCI_SUCCESS) {
-        throw SSqlException("Cannot prepare statement: " + d_query + string(": ") + OCIErrStr());
-      }
-      d_init = true;
-    } else {
-      if (OCIStmtPrepare2(d_svcctx, &d_stmt, d_err, (text*)d_query.c_str(), d_query.size(), d_stmt_key, d_stmt_keysize, OCI_NTV_SYNTAX, OCI_DEFAULT) != OCI_SUCCESS) {
-        throw SSqlException("Cannot prepare statement: " + d_query + string(": ") + OCIErrStr());
-      }
-    }
-  }
-
-  SSqlStatement* bind(const string& name, bool value) 
-  {  
+  SSqlStatement* bind(const string& name, bool value)
+  {
     return bind(name, (int)value);
   }
-  SSqlStatement* bind(const string& name, int value) 
+  SSqlStatement* bind(const string& name, int value)
   {
     if (d_paridx >= d_parnum)
      throw SSqlException("Attempt to bind more parameters than query has: " + d_query);
@@ -119,7 +105,7 @@ public:
     d_paridx++;
     return this;
   }
-  SSqlStatement* bind(const string& name, unsigned long value) 
+  SSqlStatement* bind(const string& name, unsigned long value)
   {
     if (d_paridx >= d_parnum)
      throw SSqlException("Attempt to bind more parameters than query has: " + d_query);
@@ -158,7 +144,7 @@ public:
     d_paridx++;
     return this;
   }
-  SSqlStatement* bind(const string& name, const std::string& value) 
+  SSqlStatement* bind(const string& name, const std::string& value)
   {
     if (d_paridx >= d_parnum)
      throw SSqlException("Attempt to bind more parameters than query has: " + d_query);
@@ -173,8 +159,8 @@ public:
     d_paridx++;
     return this;
   }
-  SSqlStatement* bindNull(const string& name) 
-  { 
+  SSqlStatement* bindNull(const string& name)
+  {
     if (d_paridx >= d_parnum)
      throw SSqlException("Attempt to bind more parameters than query has: " + d_query);
     prepareStatement();
@@ -186,13 +172,13 @@ public:
     d_paridx++;
     return this;
   }
-  SSqlStatement* execute() 
+  SSqlStatement* execute()
   {
     if (d_query.size() == 0) return this; // do not execute empty queries
     prepareStatement();
 
-    if (d_dolog) 
-      L<<Logger::Warning<<"Query: "<<d_query<<endl;
+    if (d_dolog)
+      g_log<<Logger::Warning<<"Query: "<<d_query<<endl;
     ub2 fntype;
     ub4 iters;
 
@@ -207,16 +193,16 @@ public:
       throw SSqlException("Cannot execute statement: " + d_query + string(": ") + OCIErrStr());
     }
 
-    d_resnum = d_residx = 0; 
+    d_resnum = d_residx = 0;
 
     if (fntype == OCI_STMT_SELECT) {
       ub4 o_fnum;
       ub4 o_resnum;
 
       // figure out what the result looks like
-      if (OCIAttrGet(d_stmt, OCI_HTYPE_STMT, (dvoid*)&o_resnum, 0, OCI_ATTR_ROW_COUNT, d_err)) 
-        throw SSqlException("Cannot get statement result row count: " + d_query + string(": ") + OCIErrStr()); // this returns 0 
-      if (OCIAttrGet(d_stmt, OCI_HTYPE_STMT, (dvoid*)&o_fnum, 0, OCI_ATTR_PARAM_COUNT, d_err)) 
+      if (OCIAttrGet(d_stmt, OCI_HTYPE_STMT, (dvoid*)&o_resnum, 0, OCI_ATTR_ROW_COUNT, d_err))
+        throw SSqlException("Cannot get statement result row count: " + d_query + string(": ") + OCIErrStr()); // this returns 0
+      if (OCIAttrGet(d_stmt, OCI_HTYPE_STMT, (dvoid*)&o_fnum, 0, OCI_ATTR_PARAM_COUNT, d_err))
         throw SSqlException("Cannot get statement result column count: " + d_query + string(": ") + OCIErrStr());
 
       d_residx = 0;
@@ -237,7 +223,7 @@ public:
           if (OCIAttrGet(parms, OCI_DTYPE_PARAM, (dvoid*)&(d_res[i].colsize), 0, OCI_ATTR_DATA_SIZE, d_err) != OCI_SUCCESS) {
             throw SSqlException("Cannot get statement result column information: " + d_query + string(": ") + OCIErrStr());
           }
-          
+
           if (d_res[i].colsize == 0) {
             if (OCIAttrGet(parms, OCI_DTYPE_PARAM, (dvoid*)&o_attrtype, 0, OCI_ATTR_DATA_TYPE, d_err) != OCI_SUCCESS) {
               throw SSqlException("Cannot get statement result column information: " + d_query + string(": ") + OCIErrStr());
@@ -258,7 +244,7 @@ public:
 
       if (d_fnum > 0) {
         for(int i=0;i<d_fnum;i++) {
-          if (OCIDefineByPos(d_stmt, &(d_res[i].handle), d_err, i+1, d_res[i].content, d_res[i].colsize+1, SQLT_STR, (dvoid*)&(d_res[i].ind), NULL, NULL, OCI_DEFAULT)) 
+          if (OCIDefineByPos(d_stmt, &(d_res[i].handle), d_err, i+1, d_res[i].content, d_res[i].colsize+1, SQLT_STR, (dvoid*)&(d_res[i].ind), NULL, NULL, OCI_DEFAULT))
             throw SSqlException("Cannot bind result column: " + d_query + string(": ") + OCIErrStr());
         }
       }
@@ -269,7 +255,7 @@ public:
     return this;
   }
 
-  string OCIErrStr() 
+  string OCIErrStr()
   {
     string mReason = "ORA-UNKNOWN";
     if (d_err != NULL) {
@@ -346,7 +332,7 @@ public:
     }
     d_bind = new struct obind[d_parnum];
     memset(d_bind, 0, sizeof(struct obind)*d_parnum);
-  
+
     if (d_release_stmt) {
       if (OCIStmtRelease(d_stmt, d_err, (text*)d_stmt_key, d_stmt_keysize, OCI_DEFAULT) != OCI_SUCCESS)
         throw SSqlException("Could not release statement: " + d_query + string(": ") + OCIErrStr());
@@ -359,10 +345,62 @@ public:
     return d_query;
   }
 
-  ~SOracleStatement() { 
+  ~SOracleStatement() {
+    releaseStatement();
+  }
+
+private:
+
+  void initStatement() {
+    if (d_query.size()==0) return;
+    if (d_prepared) return;
+
+    if (OCIHandleAlloc(d_ctx, (dvoid**)&d_err, OCI_HTYPE_ERROR, 0, NULL))
+      throw SSqlException("Cannot allocate statement error handle");
+
+    if (d_release_stmt) {
+      if (OCIStmtPrepare2(d_svcctx, &d_stmt, d_err, (text*)d_query.c_str(), d_query.size(),
+          NULL, 0, OCI_NTV_SYNTAX, OCI_DEFAULT) != OCI_SUCCESS) {
+        // failed.
+        throw SSqlException("Cannot prepare statement: " + d_query + string(": ") + OCIErrStr());
+      }
+      d_init = true;
+    } else {
+      d_init = false;
+    }
+
+    d_bind = new struct obind[d_parnum];
+    memset(d_bind, 0, sizeof(struct obind)*d_parnum);
+    // and we are done.
+  }
+
+  void prepareStatement() {
+    initStatement();
+    if (d_stmt) return; // no-op
+    if (d_query.size()==0) return;
+    if (d_init == false) {
+      if (OCIStmtPrepare2(d_svcctx, &d_stmt, d_err, (text*)d_query.c_str(), d_query.size(), NULL, 0, OCI_NTV_SYNTAX, OCI_DEFAULT) != OCI_SUCCESS) {
+        throw SSqlException("Cannot prepare statement: " + d_query + string(": ") + OCIErrStr());
+      }
+      d_init = true;
+    } else {
+      if (OCIStmtPrepare2(d_svcctx, &d_stmt, d_err, (text*)d_query.c_str(), d_query.size(), d_stmt_key, d_stmt_keysize, OCI_NTV_SYNTAX, OCI_DEFAULT) != OCI_SUCCESS) {
+        throw SSqlException("Cannot prepare statement: " + d_query + string(": ") + OCIErrStr());
+      }
+    }
+
+    d_prepared = true;
+  }
+
+  void releaseStatement() {
+    try {
+      reset();
+    } catch(SSqlException) {
+      // ignore, can't be helped.
+    }
     if (d_stmt)
       OCIStmtRelease(d_stmt, d_err, d_stmt_key, d_stmt_keysize, OCI_STRLS_CACHE_DELETE);
-    if (d_err) 
+    if (d_err)
       OCIHandleFree(d_err, OCI_HTYPE_ERROR);
     if (d_res) {
       for(int i=0;i<d_fnum;i++)
@@ -374,15 +412,17 @@ public:
         if (d_bind[i].vals && d_bind[i].release) delete [] (text*)d_bind[i].vals;
       }
     }
+    d_init = false;
+    d_prepared = false;
   }
 
-private:
   string d_query;
   OCIEnv *d_ctx;
   OCISvcCtx *d_svcctx;
   bool d_dolog;
   bool d_release_stmt;
   bool d_init;
+  bool d_prepared;
   OCIStmt* d_stmt;
   OCIError* d_err;
   int d_parnum;
@@ -430,7 +470,7 @@ SOracle::SOracle(const string &database,
     throw sPerrorException("OCIHandleAlloc(errorHandle)" + string(": ") + getOracleError());
   }
 
-  err = OCILogon2(d_environmentHandle, d_errorHandle, &d_serviceContextHandle, (OraText*)user.c_str(), user.size(), 
+  err = OCILogon2(d_environmentHandle, d_errorHandle, &d_serviceContextHandle, (OraText*)user.c_str(), user.size(),
                  (OraText*) password.c_str(),  strlen(password.c_str()), (OraText*) database.c_str(), strlen(database.c_str()), OCI_LOGON2_STMTCACHE);
   // increase statement cache to 100
   if (err) {
@@ -456,7 +496,7 @@ SOracle::~SOracle()
   if (d_serviceContextHandle != NULL) {
     err=OCILogoff(d_serviceContextHandle, d_errorHandle);
     if (err) {
-      L<<Logger::Warning<<"Problems logging out: "+getOracleError()<<endl;
+      g_log<<Logger::Warning<<"Problems logging out: "+getOracleError()<<endl;
     }
   }
 
@@ -467,7 +507,7 @@ SOracle::~SOracle()
 }
 
 void SOracle::startTransaction() {
-  std::string cmd = "SET TRANSACTION NAME '" + boost::lexical_cast<std::string>(s_txid++) + "'";
+  std::string cmd = "SET TRANSACTION NAME 'pdns_" + std::to_string(s_txid++) + "'";
   execute(cmd);
 }
 
@@ -484,8 +524,8 @@ SSqlException SOracle::sPerrorException(const string &reason)
   return SSqlException(reason);
 }
 
-SSqlStatement* SOracle::prepare(const string& query, int nparams) {
-  return new SOracleStatement(query, s_dolog, nparams, d_environmentHandle, d_serviceContextHandle, d_release_stmt);
+std::unique_ptr<SSqlStatement> SOracle::prepare(const string& query, int nparams) {
+  return std::unique_ptr<SSqlStatement>(new SOracleStatement(query, s_dolog, nparams, d_environmentHandle, d_serviceContextHandle, d_release_stmt));
 }
 
 void SOracle::execute(const string& query) {

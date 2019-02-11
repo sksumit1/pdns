@@ -1,25 +1,24 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2002 - 2014  PowerDNS.COM BV
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2
-    as published by the Free Software Foundation
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
-
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -32,7 +31,7 @@
 #include "arguments.hh"
 #include "lock.hh"
 #include "iputils.hh"
-#include <boost/foreach.hpp>
+
 
 #include "namespaces.hh"
 
@@ -54,15 +53,12 @@ string StatBag::directory()
   string dir;
   ostringstream o;
 
-  for(map<string, AtomicCounter *>::const_iterator i=d_stats.begin();
-      i!=d_stats.end();
-      i++)
-    {
-      o<<i->first<<"="<<*(i->second)<<",";
-    }
+  for(const auto& i: d_stats) {
+    o<<i.first<<"="<<*(i.second)<<",";
+  }
 
 
-  BOOST_FOREACH(const funcstats_t::value_type& val, d_funcstats) {
+  for(const funcstats_t::value_type& val :  d_funcstats) {
     o << val.first<<"="<<val.second(val.first)<<",";
   }
   dir=o.str();
@@ -74,12 +70,11 @@ vector<string>StatBag::getEntries()
 {
   vector<string> ret;
 
-  for(map<string, AtomicCounter *>::const_iterator i=d_stats.begin();
-      i!=d_stats.end();
-      i++)
-      ret.push_back(i->first);
+  for(const auto& i: d_stats) {
+      ret.push_back(i.first);
+  }
 
-  BOOST_FOREACH(const funcstats_t::value_type& val, d_funcstats) {
+  for(const funcstats_t::value_type& val :  d_funcstats) {
     ret.push_back(val.first);
   }
 
@@ -109,13 +104,13 @@ void StatBag::declare(const string &key, const string &descrip, StatBag::func_t 
 }
 
           
-void StatBag::set(const string &key, AtomicCounter::native_t value)
+void StatBag::set(const string &key, unsigned long value)
 {
   exists(key);
-  *d_stats[key]=AtomicCounter(value);
+  d_stats[key]->store(value);
 }
 
-AtomicCounter::native_t StatBag::read(const string &key)
+unsigned long StatBag::read(const string &key)
 {
   exists(key);
   funcstats_t::const_iterator iter = d_funcstats.find(key);
@@ -124,10 +119,10 @@ AtomicCounter::native_t StatBag::read(const string &key)
   return *d_stats[key];
 }
 
-AtomicCounter::native_t StatBag::readZero(const string &key)
+unsigned long StatBag::readZero(const string &key)
 {
   exists(key);
-  AtomicCounter::native_t tmp=*d_stats[key];
+  unsigned long tmp=*d_stats[key];
   d_stats[key]=0;
   return tmp;
 }
@@ -155,12 +150,9 @@ AtomicCounter *StatBag::getPointer(const string &key)
 
 StatBag::~StatBag()
 {
-  for(map<string, AtomicCounter *>::const_iterator i=d_stats.begin();
-      i!=d_stats.end();
-      i++)
-    {
-      delete i->second;
-    }
+  for(const auto& i: d_stats) {
+    delete i.second;
+  }
   
 }
 
@@ -245,7 +237,7 @@ vector<pair<string, unsigned int> > StatBag::getRing(const string &name)
     typedef pair<SComboAddress, unsigned int> stor_t;
     vector<stor_t> raw =d_comborings[name].get();
     vector<pair<string, unsigned int> > ret;
-    BOOST_FOREACH(const stor_t& stor, raw) {
+    for(const stor_t& stor :  raw) {
       ret.push_back(make_pair(stor.first.ca.toString(), stor.second));
     }
     return ret;

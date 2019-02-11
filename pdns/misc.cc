@@ -1,25 +1,24 @@
 /*
-    PowerDNS Versatile Database Driven Nameserver
-    Copyright (C) 2002 - 2014  PowerDNS.COM BV
-
-    This program is free software; you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2
-    as published by the Free Software Foundation
-
-    Additionally, the license of this program contains a special
-    exception which allows to distribute the program in binary form when
-    it is linked against OpenSSL.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program; if not, write to the Free Software
-    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
-*/
-
+ * This file is part of PowerDNS or dnsdist.
+ * Copyright -- PowerDNS.COM B.V. and its contributors
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of version 2 of the GNU General Public License as
+ * published by the Free Software Foundation.
+ *
+ * In addition, for the avoidance of any doubt, permission is granted to
+ * link this program with OpenSSL and to (re)distribute the binaries
+ * produced as the result of such linking.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+ */
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
@@ -40,10 +39,13 @@
 #include <errno.h>
 #include <cstring>
 #include <iostream>
+#include <sys/types.h>
+#include <dirent.h>
 #include <algorithm>
 #include <boost/optional.hpp>
 #include <poll.h>
 #include <iomanip>
+#include <netinet/tcp.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -52,15 +54,25 @@
 #include <boost/algorithm/string.hpp>
 #include "iputils.hh"
 #include "dnsparser.hh"
+#include <sys/types.h>
+#include <pwd.h>
+#include <grp.h>
+#ifdef __FreeBSD__
+#  include <pthread_np.h>
+#endif
+#ifdef __NetBSD__
+#  include <pthread.h>
+#  include <sched.h>
+#endif
 
 bool g_singleThreaded;
 
-int writen2(int fd, const void *buf, size_t count)
+size_t writen2(int fd, const void *buf, size_t count)
 {
   const char *ptr = (char*)buf;
   const char *eptr = ptr + count;
 
-  int res;
+  ssize_t res;
   while(ptr != eptr) {
     res = ::write(fd, ptr, eptr - ptr);
     if(res < 0) {
@@ -72,41 +84,125 @@ int writen2(int fd, const void *buf, size_t count)
     else if (res == 0)
       throw std::runtime_error("could not write all bytes, got eof in writen2");
 
-    ptr += res;
+    ptr += (size_t) res;
   }
 
   return count;
 }
 
-int readn2(int fd, void* buffer, unsigned int len)
+size_t readn2(int fd, void* buffer, size_t len)
 {
-  unsigned int pos=0;
-  int res;
+  size_t pos=0;
+  ssize_t res;
   for(;;) {
     res = read(fd, (char*)buffer + pos, len - pos);
     if(res == 0)
-      throw runtime_error("EOF while writing message");
+      throw runtime_error("EOF while reading message");
     if(res < 0) {
       if (errno == EAGAIN)
-        throw std::runtime_error("used writen2 on non-blocking socket, got EAGAIN");
+        throw std::runtime_error("used readn2 on non-blocking socket, got EAGAIN");
       else
-        unixDie("failed in writen2");
+        unixDie("failed in readn2");
     }
 
-    pos+=res;
+    pos+=(size_t)res;
     if(pos == len)
       break;
   }
   return len;
 }
 
+size_t readn2WithTimeout(int fd, void* buffer, size_t len, int idleTimeout, int totalTimeout)
+{
+  size_t pos = 0;
+  time_t start = 0;
+  int remainingTime = totalTimeout;
+  if (totalTimeout) {
+    start = time(NULL);
+  }
+
+  do {
+    ssize_t got = read(fd, (char *)buffer + pos, len - pos);
+    if (got > 0) {
+      pos += (size_t) got;
+    }
+    else if (got == 0) {
+      throw runtime_error("EOF while reading message");
+    }
+    else {
+      if (errno == EAGAIN) {
+        int res = waitForData(fd, (totalTimeout == 0 || idleTimeout <= remainingTime) ? idleTimeout : remainingTime);
+        if (res > 0) {
+          /* there is data available */
+        }
+        else if (res == 0) {
+          throw runtime_error("Timeout while waiting for data to read");
+        } else {
+          throw runtime_error("Error while waiting for data to read");
+        }
+      }
+      else {
+        unixDie("failed in readn2WithTimeout");
+      }
+    }
+
+    if (totalTimeout) {
+      time_t now = time(NULL);
+      int elapsed = now - start;
+      if (elapsed >= remainingTime) {
+        throw runtime_error("Timeout while reading data");
+      }
+      start = now;
+      remainingTime -= elapsed;
+    }
+  }
+  while (pos < len);
+
+  return len;
+}
+
+size_t writen2WithTimeout(int fd, const void * buffer, size_t len, int timeout)
+{
+  size_t pos = 0;
+  do {
+    ssize_t written = write(fd, (char *)buffer + pos, len - pos);
+
+    if (written > 0) {
+      pos += (size_t) written;
+    }
+    else if (written == 0)
+      throw runtime_error("EOF while writing message");
+    else {
+      if (errno == EAGAIN) {
+        int res = waitForRWData(fd, false, timeout, 0);
+        if (res > 0) {
+          /* there is room available */
+        }
+        else if (res == 0) {
+          throw runtime_error("Timeout while waiting to write data");
+        } else {
+          throw runtime_error("Error while waiting for room to write data");
+        }
+      }
+      else {
+        unixDie("failed in write2WithTimeout");
+      }
+    }
+  }
+  while (pos < len);
+
+  return len;
+}
 
 string nowTime()
 {
-  time_t now=time(0);
-  string t=ctime(&now);
-  boost::trim_right(t);
-  return t;
+  time_t now = time(nullptr);
+  struct tm* tm = localtime(&now);
+  char buffer[30];
+  // YYYY-mm-dd HH:MM:SS TZOFF
+  strftime(buffer, sizeof(buffer), "%F %T %z", tm);
+  buffer[sizeof(buffer)-1] = '\0';
+  return buffer;
 }
 
 uint16_t getShort(const unsigned char *p)
@@ -130,67 +226,7 @@ uint32_t getLong(const char* p)
   return getLong((unsigned char *)p);
 }
 
-
-
-/** strips a domain suffix from a domain, returns true if it stripped */
-bool stripDomainSuffix(string *qname, const string &domain)
-{
-  if(!endsOn(*qname, domain))
-    return false;
-
-  if(toLower(*qname)==toLower(domain))
-    *qname="@";
-  else {
-    if((*qname)[qname->size()-domain.size()-1]!='.')
-      return false;
-
-    qname->resize(qname->size()-domain.size()-1);
-  }
-  return true;
-}
-
-/** Chops off the start of a domain, so goes from 'www.ds9a.nl' to 'ds9a.nl' to 'nl' to ''. Return zero on the empty string */
-bool chopOff(string &domain)
-{
-  if(domain.empty())
-    return false;
-
-  string::size_type fdot=domain.find('.');
-
-  if(fdot==string::npos)
-    domain="";
-  else {
-    string::size_type remain = domain.length() - (fdot + 1);
-    char tmp[remain];
-    memcpy(tmp, domain.c_str()+fdot+1, remain);
-    domain.assign(tmp, remain); // don't dare to do this w/o tmp holder :-)
-  }
-  return true;
-}
-
-/** Chops off the start of a domain, so goes from 'www.ds9a.nl.' to 'ds9a.nl.' to 'nl.' to '.' Return zero on the empty string */
-bool chopOffDotted(string &domain)
-{
-  if(domain.empty() || (domain.size()==1 && domain[0]=='.'))
-    return false;
-
-  string::size_type fdot=domain.find('.');
-  if(fdot == string::npos)
-    return false;
-
-  if(fdot==domain.size()-1)
-    domain=".";
-  else  {
-    string::size_type remain = domain.length() - (fdot + 1);
-    char tmp[remain];
-    memcpy(tmp, domain.c_str()+fdot+1, remain);
-    domain.assign(tmp, remain);
-  }
-  return true;
-}
-
-
-bool ciEqual(const string& a, const string& b)
+static bool ciEqual(const string& a, const string& b)
 {
   if(a.size()!=b.size())
     return false;
@@ -203,7 +239,7 @@ bool ciEqual(const string& a, const string& b)
 }
 
 /** does domain end on suffix? Is smart about "wwwds9a.nl" "ds9a.nl" not matching */
-bool endsOn(const string &domain, const string &suffix)
+static bool endsOn(const string &domain, const string &suffix)
 {
   if( suffix.empty() || ciEqual(domain, suffix) )
     return true;
@@ -223,31 +259,20 @@ bool endsOn(const string &domain, const string &suffix)
   return true;
 }
 
-// REMOVE ME
-bool dottedEndsOn(const DNSName &domain, const DNSName &suffix)
+/** strips a domain suffix from a domain, returns true if it stripped */
+bool stripDomainSuffix(string *qname, const string &domain)
 {
-  return domain.isPartOf(suffix);
-}
-
-
-/** does domain end on suffix? Is smart about "wwwds9a.nl" "ds9a.nl" not matching */
-bool dottedEndsOn(const string &domain, const string &suffix)
-{
-  if( suffix=="." || ciEqual(domain, suffix) )
-    return true;
-
-  if(domain.size()<=suffix.size())
+  if(!endsOn(*qname, domain))
     return false;
 
-  string::size_type dpos=domain.size()-suffix.size()-1, spos=0;
-
-  if(domain[dpos++]!='.')
-    return false;
-
-  for(; dpos < domain.size(); ++dpos, ++spos)
-    if(dns_tolower(domain[dpos]) != dns_tolower(suffix[spos]))
+  if(toLower(*qname)==toLower(domain))
+    *qname="@";
+  else {
+    if((*qname)[qname->size()-domain.size()-1]!='.')
       return false;
 
+    qname->resize(qname->size()-domain.size()-1);
+  }
   return true;
 }
 
@@ -259,7 +284,7 @@ static void parseService4(const string &descr, ServiceTuple &st)
     throw PDNSException("Unable to parse '"+descr+"' as a service");
   st.host=parts[0];
   if(parts.size()>1)
-    st.port=atoi(parts[1].c_str());
+    st.port=pdns_stou(parts[1]);
 }
 
 static void parseService6(const string &descr, ServiceTuple &st)
@@ -270,7 +295,7 @@ static void parseService6(const string &descr, ServiceTuple &st)
 
   st.host=descr.substr(1, pos-1);
   if(pos + 2 < descr.length())
-    st.port=atoi(descr.c_str() + pos +2);
+    st.port=pdns_stou(descr.substr(pos+2));
 }
 
 
@@ -299,7 +324,7 @@ int waitForData(int fd, int seconds, int useconds)
   return waitForRWData(fd, true, seconds, useconds);
 }
 
-int waitForRWData(int fd, bool waitForRead, int seconds, int useconds)
+int waitForRWData(int fd, bool waitForRead, int seconds, int useconds, bool* error, bool* disconnected)
 {
   int ret;
 
@@ -313,10 +338,54 @@ int waitForRWData(int fd, bool waitForRead, int seconds, int useconds)
     pfd.events=POLLOUT;
 
   ret = poll(&pfd, 1, seconds * 1000 + useconds/1000);
-  if ( ret == -1 )
-    errno = ETIMEDOUT; // ???
+  if (ret > 0) {
+    if (error && (pfd.revents & POLLERR)) {
+      *error = true;
+    }
+    if (disconnected && (pfd.revents & POLLHUP)) {
+      *disconnected = true;
+    }
+  }
 
   return ret;
+}
+
+// returns -1 in case of error, 0 if no data is available, 1 if there is. In the first two cases, errno is set
+int waitForMultiData(const set<int>& fds, const int seconds, const int useconds, int* fdOut) {
+  set<int> realFDs;
+  for (const auto& fd : fds) {
+    if (fd >= 0 && realFDs.count(fd) == 0) {
+      realFDs.insert(fd);
+    }
+  }
+
+  std::vector<struct pollfd> pfds(realFDs.size());
+  memset(pfds.data(), 0, realFDs.size()*sizeof(struct pollfd));
+  int ctr = 0;
+  for (const auto& fd : realFDs) {
+    pfds[ctr].fd = fd;
+    pfds[ctr].events = POLLIN;
+    ctr++;
+  }
+
+  int ret;
+  if(seconds >= 0)
+    ret = poll(pfds.data(), realFDs.size(), seconds * 1000 + useconds/1000);
+  else
+    ret = poll(pfds.data(), realFDs.size(), -1);
+  if(ret <= 0)
+    return ret;
+
+  set<int> pollinFDs;
+  for (const auto& pfd : pfds) {
+    if (pfd.revents & POLLIN) {
+      pollinFDs.insert(pfd.fd);
+    }
+  }
+  set<int>::const_iterator it(pollinFDs.begin());
+  advance(it, random() % pollinFDs.size());
+  *fdOut = *it;
+  return 1;
 }
 
 // returns -1 in case of error, 0 if no data is available, 1 if there is. In the first two cases, errno is set
@@ -374,11 +443,11 @@ string humanDuration(time_t passed)
 DTime::DTime()
 {
 //  set(); // saves lots of gettimeofday calls
+  d_set.tv_sec=d_set.tv_usec=0;
 }
 
-DTime::DTime(const DTime &dt)
+DTime::DTime(const DTime &dt) : d_set(dt.d_set)
 {
-  d_set=dt.d_set;
 }
 
 time_t DTime::time()
@@ -497,7 +566,7 @@ bool IpToU32(const string &str, uint32_t *ip)
 string U32ToIP(uint32_t val)
 {
   char tmp[17];
-  snprintf(tmp, sizeof(tmp)-1, "%u.%u.%u.%u",
+  snprintf(tmp, sizeof(tmp), "%u.%u.%u.%u",
            (val >> 24)&0xff,
            (val >> 16)&0xff,
            (val >>  8)&0xff,
@@ -513,32 +582,32 @@ string makeHexDump(const string& str)
   ret.reserve((int)(str.size()*2.2));
 
   for(string::size_type n=0;n<str.size();++n) {
-    sprintf(tmp,"%02x ", (unsigned char)str[n]);
+    snprintf(tmp, sizeof(tmp), "%02x ", (unsigned char)str[n]);
     ret+=tmp;
   }
   return ret;
 }
 
 // shuffle, maintaining some semblance of order
-void shuffle(vector<DNSResourceRecord>& rrs)
+void shuffle(vector<DNSZoneRecord>& rrs)
 {
-  vector<DNSResourceRecord>::iterator first, second;
+  vector<DNSZoneRecord>::iterator first, second;
   for(first=rrs.begin();first!=rrs.end();++first)
-    if(first->d_place==DNSResourceRecord::ANSWER && first->qtype.getCode() != QType::CNAME) // CNAME must come first
+    if(first->dr.d_place==DNSResourceRecord::ANSWER && first->dr.d_type != QType::CNAME) // CNAME must come first
       break;
   for(second=first;second!=rrs.end();++second)
-    if(second->d_place!=DNSResourceRecord::ANSWER)
+    if(second->dr.d_place!=DNSResourceRecord::ANSWER)
       break;
 
-  if(second-first>1)
+  if(second-first > 1)
     random_shuffle(first,second);
 
   // now shuffle the additional records
   for(first=second;first!=rrs.end();++first)
-    if(first->d_place==DNSResourceRecord::ADDITIONAL && first->qtype.getCode() != QType::CNAME) // CNAME must come first
+    if(first->dr.d_place==DNSResourceRecord::ADDITIONAL && first->dr.d_type != QType::CNAME) // CNAME must come first
       break;
   for(second=first;second!=rrs.end();++second)
-    if(second->d_place!=DNSResourceRecord::ADDITIONAL)
+    if(second->dr.d_place!=DNSResourceRecord::ADDITIONAL)
       break;
 
   if(second-first>1)
@@ -553,10 +622,10 @@ void shuffle(vector<DNSRecord>& rrs)
 {
   vector<DNSRecord>::iterator first, second;
   for(first=rrs.begin();first!=rrs.end();++first)
-    if(first->d_place==DNSRecord::Answer && first->d_type != QType::CNAME) // CNAME must come first
+    if(first->d_place==DNSResourceRecord::ANSWER && first->d_type != QType::CNAME) // CNAME must come first
       break;
   for(second=first;second!=rrs.end();++second)
-    if(second->d_place!=DNSRecord::Answer)
+    if(second->d_place!=DNSResourceRecord::ANSWER || second->d_type == QType::RRSIG) // leave RRSIGs at the end
       break;
 
   if(second-first>1)
@@ -564,10 +633,10 @@ void shuffle(vector<DNSRecord>& rrs)
 
   // now shuffle the additional records
   for(first=second;first!=rrs.end();++first)
-    if(first->d_place==DNSRecord::Additional && first->d_type != QType::CNAME) // CNAME must come first
+    if(first->d_place==DNSResourceRecord::ADDITIONAL && first->d_type != QType::CNAME) // CNAME must come first
       break;
   for(second=first; second!=rrs.end(); ++second)
-    if(second->d_place!=DNSRecord::Additional)
+    if(second->d_place!=DNSResourceRecord::ADDITIONAL)
       break;
 
   if(second-first>1)
@@ -576,12 +645,22 @@ void shuffle(vector<DNSRecord>& rrs)
   // we don't shuffle the rest
 }
 
+static uint16_t mapTypesToOrder(uint16_t type)
+{
+  if(type == QType::CNAME)
+    return 0;
+  if(type == QType::RRSIG)
+    return 65535;
+  else
+    return 1;
+}
+
 // make sure rrs is sorted in d_place order to avoid surprises later
 // then shuffle the parts that desire shuffling
 void orderAndShuffle(vector<DNSRecord>& rrs)
 {
   std::stable_sort(rrs.begin(), rrs.end(), [](const DNSRecord&a, const DNSRecord& b) { 
-      return a.d_place < b.d_place;
+      return std::make_tuple(a.d_place, mapTypesToOrder(a.d_type)) < std::make_tuple(b.d_place, mapTypesToOrder(b.d_type));
     });
   shuffle(rrs);
 }
@@ -665,58 +744,30 @@ string stripDot(const string& dom)
 }
 
 
-string labelReverse(const std::string& qname)
-{
-  if(qname.empty())
-    return qname;
-
-  bool dotName = qname.find('.') != string::npos;
-
-  vector<string> labels;
-  stringtok(labels, qname, ". ");
-  if(labels.size()==1)
-    return qname;
-
-  string ret;  // vv const_reverse_iter http://gcc.gnu.org/bugzilla/show_bug.cgi?id=11729
-  for(vector<string>::reverse_iterator iter = labels.rbegin(); iter != labels.rend(); ++iter) {
-    if(iter != labels.rbegin())
-      ret.append(1, dotName ? ' ' : '.');
-    ret+=*iter;
-  }
-  return ret;
-}
-
-// do NOT feed trailing dots!
-// www.powerdns.com, powerdns.com -> www
-string makeRelative(const std::string& fqdn, const std::string& zone)
-{
-  if(zone.empty())
-    return fqdn;
-  if(toLower(fqdn) != toLower(zone))
-    return fqdn.substr(0, fqdn.size() - zone.length() - 1); // strip domain name
-  return "";
-}
-
-string dotConcat(const std::string& a, const std::string &b)
-{
-  if(a.empty() || b.empty())
-    return a+b;
-  else
-    return a+"."+b;
-}
 
 int makeIPv6sockaddr(const std::string& addr, struct sockaddr_in6* ret)
 {
   if(addr.empty())
     return -1;
   string ourAddr(addr);
-  int port = -1;
+  bool portSet = false;
+  unsigned int port;
   if(addr[0]=='[') { // [::]:53 style address
     string::size_type pos = addr.find(']');
-    if(pos == string::npos || pos + 2 > addr.size() || addr[pos+1]!=':')
+    if(pos == string::npos)
       return -1;
     ourAddr.assign(addr.c_str() + 1, pos-1);
-    port = atoi(addr.c_str()+pos+2);
+    if (pos + 1 != addr.size()) { // complete after ], no port specified
+      if (pos + 2 > addr.size() || addr[pos+1]!=':')
+        return -1;
+      try {
+        port = pdns_stou(addr.substr(pos+2));
+        portSet = true;
+      }
+      catch(const std::out_of_range&) {
+        return -1;
+      }
+    }
   }
   ret->sin6_scope_id=0;
   ret->sin6_family=AF_INET6;
@@ -730,7 +781,8 @@ int makeIPv6sockaddr(const std::string& addr, struct sockaddr_in6* ret)
     hints.ai_flags = AI_NUMERICHOST;
 
     int error;
-    if((error=getaddrinfo(ourAddr.c_str(), 0, &hints, &res))) { // this is correct
+    // getaddrinfo has anomalous return codes, anything nonzero is an error, positive or negative
+    if((error=getaddrinfo(ourAddr.c_str(), 0, &hints, &res))) {
       return -1;
     }
 
@@ -738,8 +790,12 @@ int makeIPv6sockaddr(const std::string& addr, struct sockaddr_in6* ret)
     freeaddrinfo(res);
   }
 
-  if(port >= 0)
+  if(portSet) {
+    if(port > 65535)
+      return -1;
+
     ret->sin6_port = htons(port);
+  }
 
   return 0;
 }
@@ -764,6 +820,9 @@ int makeIPv4sockaddr(const std::string& str, struct sockaddr_in* ret)
 
   char *eptr = (char*)str.c_str() + str.size();
   int port = strtol(str.c_str() + pos + 1, &eptr, 10);
+  if (port < 0 || port > 65535)
+    return -1;
+
   if(*eptr)
     return -1;
 
@@ -821,7 +880,10 @@ Regex::Regex(const string &expr)
     throw PDNSException("Regular expression did not compile");
 }
 
-void addCMsgSrcAddr(struct msghdr* msgh, void* cmsgbuf, const ComboAddress* source)
+// if you end up here because valgrind told you were are doing something wrong
+// with msgh->msg_controllen, please refer to https://github.com/PowerDNS/pdns/pull/3962
+// first.
+void addCMsgSrcAddr(struct msghdr* msgh, void* cmsgbuf, const ComboAddress* source, int itfIndex)
 {
   struct cmsghdr *cmsg = NULL;
 
@@ -839,10 +901,10 @@ void addCMsgSrcAddr(struct msghdr* msgh, void* cmsgbuf, const ComboAddress* sour
     pkt = (struct in6_pktinfo *) CMSG_DATA(cmsg);
     memset(pkt, 0, sizeof(*pkt));
     pkt->ipi6_addr = source->sin6.sin6_addr;
-    msgh->msg_controllen = cmsg->cmsg_len; // makes valgrind happy and is slightly better style
+    pkt->ipi6_ifindex = itfIndex;
   }
   else {
-#ifdef IP_PKTINFO
+#if defined(IP_PKTINFO)
     struct in_pktinfo *pkt;
 
     msgh->msg_control = cmsgbuf;
@@ -856,9 +918,8 @@ void addCMsgSrcAddr(struct msghdr* msgh, void* cmsgbuf, const ComboAddress* sour
     pkt = (struct in_pktinfo *) CMSG_DATA(cmsg);
     memset(pkt, 0, sizeof(*pkt));
     pkt->ipi_spec_dst = source->sin4.sin_addr;
-    msgh->msg_controllen = cmsg->cmsg_len;
-#endif
-#ifdef IP_SENDSRCADDR
+    pkt->ipi_ifindex = itfIndex;
+#elif defined(IP_SENDSRCADDR)
     struct in_addr *in;
 
     msgh->msg_control = cmsgbuf;
@@ -871,7 +932,6 @@ void addCMsgSrcAddr(struct msghdr* msgh, void* cmsgbuf, const ComboAddress* sour
 
     in = (struct in_addr *) CMSG_DATA(cmsg);
     *in = source->sin4.sin_addr;
-    msgh->msg_controllen = cmsg->cmsg_len;
 #endif
   }
 }
@@ -994,24 +1054,22 @@ bool setSocketTimestamps(int fd)
 #ifdef SO_TIMESTAMP
   int on=1;
   return setsockopt(fd, SOL_SOCKET, SO_TIMESTAMP, (char*)&on, sizeof(on)) == 0;
-#endif
-  return true; // we pretend this happened.
-}
-
-uint32_t pdns_strtoui(const char *nptr, char **endptr, int base)
-{
-#if ULONG_MAX == 4294967295
-  return strtoul(nptr, endptr, base);
 #else
-  unsigned long val = strtoul(nptr, endptr, base);
-  if (val > UINT_MAX) {
-   errno = ERANGE;
-   return UINT_MAX;
-  }
-
-  return val;
+  return true; // we pretend this happened.
 #endif
 }
+
+bool setTCPNoDelay(int sock)
+{
+  int flag = 1;
+  return setsockopt(sock,            /* socket affected */
+                    IPPROTO_TCP,     /* set option at TCP level */
+                    TCP_NODELAY,     /* name of option */
+                    (char *) &flag,  /* the cast is historical cruft */
+                    sizeof(flag)) == 0;    /* length of option value */
+}
+
+
 bool setNonBlocking(int sock)
 {
   int flags=fcntl(sock,F_GETFL,0);
@@ -1026,6 +1084,20 @@ bool setBlocking(int sock)
   if(flags<0 || fcntl(sock, F_SETFL,flags&(~O_NONBLOCK)) <0)
     return false;
   return true;
+}
+
+bool setReuseAddr(int sock)
+{
+  int tmp = 1;
+  if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (char*)&tmp, static_cast<unsigned>(sizeof tmp))<0)
+    throw PDNSException(string("Setsockopt failed: ")+strerror(errno));
+  return true;
+}
+
+bool isNonBlocking(int sock)
+{
+  int flags=fcntl(sock,F_GETFL,0);
+  return flags & O_NONBLOCK;
 }
 
 // Closes a socket.
@@ -1047,6 +1119,32 @@ bool setCloseOnExec(int sock)
   return true;
 }
 
+string getMACAddress(const ComboAddress& ca)
+{
+  string ret;
+#ifdef __linux__
+  ifstream ifs("/proc/net/arp");
+  if(!ifs)
+    return ret;
+  string line;
+  string match=ca.toString()+' ';
+  while(getline(ifs, line)) {
+    if(boost::starts_with(line, match)) {
+      vector<string> parts;
+      stringtok(parts, line, " \n\t\r");
+      if(parts.size() < 4)
+        return ret;
+      unsigned int tmp[6];
+      sscanf(parts[3].c_str(), "%02x:%02x:%02x:%02x:%02x:%02x", tmp, tmp+1, tmp+2, tmp+3, tmp+4, tmp+5);
+      for(int i = 0 ; i< 6 ; ++i)
+        ret.append(1, (char)tmp[i]);
+      return ret;
+    }
+  }
+#endif
+  return ret;
+}
+
 uint64_t udpErrorStats(const std::string& str)
 {
 #ifdef __linux__
@@ -1061,13 +1159,13 @@ uint64_t udpErrorStats(const std::string& str)
       if(parts.size() < 7)
 	break;
       if(str=="udp-rcvbuf-errors")
-	return boost::lexical_cast<uint64_t>(parts[5]);
+	return std::stoull(parts[5]);
       else if(str=="udp-sndbuf-errors")
-	return boost::lexical_cast<uint64_t>(parts[6]);
+	return std::stoull(parts[6]);
       else if(str=="udp-noport-errors")
-	return boost::lexical_cast<uint64_t>(parts[2]);
+	return std::stoull(parts[2]);
       else if(str=="udp-in-errors")
-	return boost::lexical_cast<uint64_t>(parts[3]);
+	return std::stoull(parts[3]);
       else
 	return 0;
     }
@@ -1078,20 +1176,19 @@ uint64_t udpErrorStats(const std::string& str)
 
 bool getTSIGHashEnum(const DNSName& algoName, TSIGHashEnum& algoEnum)
 {
-  string strAlgoName = algoName.toString();
-  if (strAlgoName == "hmac-md5.sig-alg.reg.int." || strAlgoName == "hmac-md5.") // FIXME400
+  if (algoName == DNSName("hmac-md5.sig-alg.reg.int") || algoName == DNSName("hmac-md5"))
     algoEnum = TSIG_MD5;
-  else if (strAlgoName == "hmac-sha1.")
+  else if (algoName == DNSName("hmac-sha1"))
     algoEnum = TSIG_SHA1;
-  else if (strAlgoName == "hmac-sha224.")
+  else if (algoName == DNSName("hmac-sha224"))
     algoEnum = TSIG_SHA224;
-  else if (strAlgoName == "hmac-sha256.")
+  else if (algoName == DNSName("hmac-sha256"))
     algoEnum = TSIG_SHA256;
-  else if (strAlgoName == "hmac-sha384.")
+  else if (algoName == DNSName("hmac-sha384"))
     algoEnum = TSIG_SHA384;
-  else if (strAlgoName == "hmac-sha512.")
+  else if (algoName == DNSName("hmac-sha512"))
     algoEnum = TSIG_SHA512;
-  else if (strAlgoName == "gss-tsig.")
+  else if (algoName == DNSName("gss-tsig"))
     algoEnum = TSIG_GSS;
   else {
      return false;
@@ -1111,4 +1208,243 @@ DNSName getTSIGAlgoName(TSIGHashEnum& algoEnum)
   case TSIG_GSS: return DNSName("gss-tsig.");
   }
   throw PDNSException("getTSIGAlgoName does not understand given algorithm, please fix!");
+}
+
+uint64_t getOpenFileDescriptors(const std::string&)
+{
+#ifdef __linux__
+  DIR* dirhdl=opendir(("/proc/"+std::to_string(getpid())+"/fd/").c_str());
+  if(!dirhdl) 
+    return 0;
+
+  struct dirent *entry;
+  int ret=0;
+  while((entry = readdir(dirhdl))) {
+    uint32_t num;
+    try {
+      num = pdns_stou(entry->d_name);
+    } catch (...) {
+      continue; // was not a number.
+    }
+    if(std::to_string(num) == entry->d_name)
+      ret++;
+  }
+  closedir(dirhdl);
+  return ret;
+
+#else
+  return 0;
+#endif
+}
+
+uint64_t getRealMemoryUsage(const std::string&)
+{
+#ifdef __linux__
+  ifstream ifs("/proc/"+std::to_string(getpid())+"/smaps");
+  if(!ifs)
+    return 0;
+  string line;
+  uint64_t bytes=0;
+  string header("Private_Dirty:");
+  while(getline(ifs, line)) {
+    if(boost::starts_with(line, header)) {
+      bytes += std::stoull(line.substr(header.length() + 1))*1024;
+    }
+  }
+  return bytes;
+#else
+  return 0;
+#endif
+}
+
+uint64_t getCPUTimeUser(const std::string&)
+{
+  struct rusage ru;
+  getrusage(RUSAGE_SELF, &ru);
+  return (ru.ru_utime.tv_sec*1000ULL + ru.ru_utime.tv_usec/1000);
+}
+
+uint64_t getCPUTimeSystem(const std::string&)
+{
+  struct rusage ru;
+  getrusage(RUSAGE_SELF, &ru);
+  return (ru.ru_stime.tv_sec*1000ULL + ru.ru_stime.tv_usec/1000);
+}
+
+double DiffTime(const struct timespec& first, const struct timespec& second)
+{
+  int seconds=second.tv_sec - first.tv_sec;
+  int nseconds=second.tv_nsec - first.tv_nsec;
+  
+  if(nseconds < 0) {
+    seconds-=1;
+    nseconds+=1000000000;
+  }
+  return seconds + nseconds/1000000000.0;
+}
+
+double DiffTime(const struct timeval& first, const struct timeval& second)
+{
+  int seconds=second.tv_sec - first.tv_sec;
+  int useconds=second.tv_usec - first.tv_usec;
+  
+  if(useconds < 0) {
+    seconds-=1;
+    useconds+=1000000;
+  }
+  return seconds + useconds/1000000.0;
+}
+
+uid_t strToUID(const string &str)
+{
+  uid_t result = 0;
+  const char * cstr = str.c_str();
+  struct passwd * pwd = getpwnam(cstr);
+
+  if (pwd == NULL) {
+    long long val;
+
+    try {
+      val = stoll(str);
+    }
+    catch(std::exception& e) {
+      throw runtime_error((boost::format("Error: Unable to parse user ID %s") % cstr).str() );
+    }
+
+    if (val < std::numeric_limits<uid_t>::min() || val > std::numeric_limits<uid_t>::max()) {
+      throw runtime_error((boost::format("Error: Unable to parse user ID %s") % cstr).str() );
+    }
+
+    result = static_cast<uid_t>(val);
+  }
+  else {
+    result = pwd->pw_uid;
+  }
+
+  return result;
+}
+
+gid_t strToGID(const string &str)
+{
+  gid_t result = 0;
+  const char * cstr = str.c_str();
+  struct group * grp = getgrnam(cstr);
+
+  if (grp == NULL) {
+    long long val;
+
+    try {
+      val = stoll(str);
+    }
+    catch(std::exception& e) {
+      throw runtime_error((boost::format("Error: Unable to parse group ID %s") % cstr).str() );
+    }
+
+    if (val < std::numeric_limits<gid_t>::min() || val > std::numeric_limits<gid_t>::max()) {
+      throw runtime_error((boost::format("Error: Unable to parse group ID %s") % cstr).str() );
+    }
+
+    result = static_cast<gid_t>(val);
+  }
+  else {
+    result = grp->gr_gid;
+  }
+
+  return result;
+}
+
+unsigned int pdns_stou(const std::string& str, size_t * idx, int base)
+{
+  if (str.empty()) return 0; // compatibility
+  unsigned long result;
+  try {
+    result = std::stoul(str, idx, base);
+  }
+  catch(std::invalid_argument& e) {
+    throw std::invalid_argument(string(e.what()) + "; (invalid argument during std::stoul); data was \""+str+"\"");
+  }
+  catch(std::out_of_range& e) {
+    throw std::out_of_range(string(e.what()) + "; (out of range during std::stoul); data was \""+str+"\"");
+  }
+  if (result > std::numeric_limits<unsigned int>::max()) {
+    throw std::out_of_range("stoul returned result out of unsigned int range; data was \""+str+"\"");
+  }
+  return static_cast<unsigned int>(result);
+}
+
+bool isSettingThreadCPUAffinitySupported()
+{
+#ifdef HAVE_PTHREAD_SETAFFINITY_NP
+  return true;
+#else
+  return false;
+#endif
+}
+
+int mapThreadToCPUList(pthread_t tid, const std::set<int>& cpus)
+{
+#ifdef HAVE_PTHREAD_SETAFFINITY_NP
+#  ifdef __NetBSD__
+  cpuset_t *cpuset;
+  cpuset = cpuset_create();
+  for (const auto cpuID : cpus) {
+    cpuset_set(cpuID, cpuset);
+  }
+
+  return pthread_setaffinity_np(tid,
+                                cpuset_size(cpuset),
+                                cpuset);
+#  else
+#    ifdef __FreeBSD__
+#      define cpu_set_t cpuset_t
+#    endif
+  cpu_set_t cpuset;
+  CPU_ZERO(&cpuset);
+  for (const auto cpuID : cpus) {
+    CPU_SET(cpuID, &cpuset);
+  }
+
+  return pthread_setaffinity_np(tid,
+                                sizeof(cpuset),
+                                &cpuset);
+#  endif
+#else
+  return ENOSYS;
+#endif /* HAVE_PTHREAD_SETAFFINITY_NP */
+}
+
+std::vector<ComboAddress> getResolvers(const std::string& resolvConfPath)
+{
+  std::vector<ComboAddress> results;
+
+  ifstream ifs(resolvConfPath);
+  if (!ifs) {
+    return results;
+  }
+
+  string line;
+  while(std::getline(ifs, line)) {
+    boost::trim_right_if(line, is_any_of(" \r\n\x1a"));
+    boost::trim_left(line); // leading spaces, let's be nice
+
+    string::size_type tpos = line.find_first_of(";#");
+    if (tpos != string::npos) {
+      line.resize(tpos);
+    }
+
+    if (boost::starts_with(line, "nameserver ") || boost::starts_with(line, "nameserver\t")) {
+      vector<string> parts;
+      stringtok(parts, line, " \t,"); // be REALLY nice
+      for(vector<string>::const_iterator iter = parts.begin() + 1; iter != parts.end(); ++iter) {
+        try {
+          results.emplace_back(*iter, 53);
+        }
+        catch(...)
+        {
+        }
+      }
+    }
+  }
+
+  return results;
 }

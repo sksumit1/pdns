@@ -6,6 +6,7 @@
 #include "logger.hh"
 #include "arguments.hh"
 #include "version.hh"
+#include "validate-recursor.hh"
 
 #include <stdint.h>
 #ifndef PACKAGEVERSION 
@@ -20,13 +21,23 @@ void doSecPoll(time_t* last_secpoll)
   if(::arg()["security-poll-suffix"].empty())
     return;
 
+  string pkgv(PACKAGEVERSION);
   struct timeval now;
   gettimeofday(&now, 0);
-  SyncRes sr(now);
-  sr.d_doDNSSEC=true;
-  vector<DNSRecord> ret;
 
-  string version = "recursor-" +string(PACKAGEVERSION);
+  /* update last_secpoll right now, even if it fails
+     we don't want to retry right away and hammer the server */
+  *last_secpoll=now.tv_sec;
+
+  SyncRes sr(now);
+  if (g_dnssecmode != DNSSECMode::Off) {
+    sr.setDoDNSSEC(true);
+    sr.setDNSSECValidationRequested(true);
+  }
+
+  vector<DNSRecord> ret;
+  
+  string version = "recursor-" +pkgv;
   string qstring(version.substr(0, 63)+ ".security-status."+::arg()["security-poll-suffix"]);
 
   if(*qstring.rbegin()!='.')
@@ -35,38 +46,51 @@ void doSecPoll(time_t* last_secpoll)
   boost::replace_all(qstring, "+", "_");
   boost::replace_all(qstring, "~", "_");
 
+  vState state = Indeterminate;
   DNSName query(qstring);
   int res=sr.beginResolve(query, QType(QType::TXT), 1, ret);
+
+  if (g_dnssecmode != DNSSECMode::Off && res) {
+    state = sr.getValidationState();
+  }
+
+  if(state == Bogus) {
+    g_log<<Logger::Error<<"Could not retrieve security status update for '" +pkgv+ "' on '"<<query<<"', DNSSEC validation result was Bogus!"<<endl;
+    if(g_security_status == 1) // If we were OK, go to unknown
+      g_security_status = 0;
+    return;
+  }
+
   if(!res && !ret.empty()) {
-    string content=ret.begin()->d_content->getZoneRepresentation();
+    string content;
+    for(const auto&r : ret) {
+      if(r.d_type == QType::TXT)
+        content = r.d_content->getZoneRepresentation();
+    }
+
     if(!content.empty() && content[0]=='"' && content[content.size()-1]=='"') {
       content=content.substr(1, content.length()-2);
     }
-      
+
     pair<string, string> split = splitField(content, ' ');
     
-    g_security_status = atoi(split.first.c_str());
+    g_security_status = std::stoi(split.first);
     g_security_message = split.second;
-
-    *last_secpoll=now.tv_sec;
   }
   else {
-    string pkgv(PACKAGEVERSION);
-    if(pkgv.find("0.0."))
-      L<<Logger::Warning<<"Could not retrieve security status update for '" +pkgv+ "' on '"<<query<<"', RCODE = "<< RCode::to_s(res)<<endl;
+    if(pkgv.find("0.0.") != 0)
+      g_log<<Logger::Warning<<"Could not retrieve security status update for '" +pkgv+ "' on '"<<query<<"', RCODE = "<< RCode::to_s(res)<<endl;
     else
-      L<<Logger::Warning<<"Not validating response for security status update, this a non-release version."<<endl;
+      g_log<<Logger::Warning<<"Ignoring response for security status update, this is a non-release version."<<endl;
 
-    if(g_security_status == 1) // it was ok, not it is unknown
+    if(g_security_status == 1) // it was ok, now it is unknown
       g_security_status = 0;
-    if(res == RCode::NXDomain) // if we had servfail, keep on trying more more frequently
-      *last_secpoll=now.tv_sec; 
   }
 
   if(g_security_status == 2) {
-    L<<Logger::Error<<"PowerDNS Security Update Recommended: "<<g_security_message<<endl;
+    g_log<<Logger::Error<<"PowerDNS Security Update Recommended: "<<g_security_message<<endl;
   }
   else if(g_security_status == 3) {
-    L<<Logger::Error<<"PowerDNS Security Update Mandatory: "<<g_security_message<<endl;
+    g_log<<Logger::Error<<"PowerDNS Security Update Mandatory: "<<g_security_message<<endl;
   }
 }

@@ -29,9 +29,10 @@
 #include <vector>
 #include <boost/tokenizer.hpp>
 #include <boost/foreach.hpp>
+#include "backendutil.cc"
 
 #if 0
-#define DEBUGLOG(msg) L<<Logger::Error<<msg
+#define DEBUGLOG(msg) g_log<<Logger::Error<<msg
 #else
 #define DEBUGLOG(msg) do {} while(0)
 #endif
@@ -56,7 +57,7 @@ private:
   }
 public:
   CassandraBackend(const string &suffix) {
-	  L << Logger::Info << "[CassandraBackend] Launching CassandraBackend instance " << endl;
+	  g_log << Logger::Info << "[CassandraBackend] Launching CassandraBackend instance " << endl;
 	  setArgPrefix("cassandra"+suffix);
 	 try {
 		std::string seed_nodes = getArg("seed-nodes");
@@ -81,17 +82,17 @@ public:
 		int enable_tcp_nodelay = getArgAsNum("enable-tcp-nodelay");
 		int enable_tcp_keepalive = getArgAsNum("enable-tcp-keepalive");
 
-//		L << Logger::Info << " cassandra-seed-nodes " << seed_nodes << " cassandra-keyspace " << keyspace << endl;
-//		L << Logger::Info << " cassandra-username " << username << " cassandra-password " << password << endl;
-//		L << Logger::Info << " cassandra-core-connections " << core_connections << " cassandra-max_connections " << max_connections << endl;
-//		L << Logger::Info << "[cassandradbmanager] cassandra-protocol-version " << protocol_version << endl;
-//		L << Logger::Info << "[cassandradbmanager] cassandra-max-concurrent-creations " << max_concurrent_creations << endl;
-//		L << Logger::Info << "[cassandradbmanager] cassandra-queue-size-io " << queue_size_io << " cassandra-queue-size-event " << queue_size_event << endl;
-//		L << Logger::Info << "[cassandradbmanager] cassandra-reconnect-wait-time " << reconnect_wait_time << " cassandra-concurrent-requests-threshold " << concurrent_requests_threshold << endl;
-//		L << Logger::Info << "[cassandradbmanager] cassandra-connect-timeout " << connect_timeout << " cassandra-request-timeout " << request_timeout << endl;
-//		L << Logger::Info << "[cassandradbmanager] cassandra-enable-load-balance-round-robin " << enable_load_balance_round_robin << " cassandra-enable-token-aware-routing " << enable_token_aware_routing << endl;
-//		L << Logger::Info << "[cassandradbmanager] cassandra-enable-latency-aware-routing " << enable_latency_aware_routing << endl;
-//		L << Logger::Info << "[cassandradbmanager] cassandra-enable-tcp-nodelay " << enable_tcp_nodelay << " cassandra-enable-tcp-keepalive " << enable_tcp_keepalive << endl;
+//		g_log << Logger::Info << " cassandra-seed-nodes " << seed_nodes << " cassandra-keyspace " << keyspace << endl;
+//		g_log << Logger::Info << " cassandra-username " << username << " cassandra-password " << password << endl;
+//		g_log << Logger::Info << " cassandra-core-connections " << core_connections << " cassandra-max_connections " << max_connections << endl;
+//		g_log << Logger::Info << "[cassandradbmanager] cassandra-protocol-version " << protocol_version << endl;
+//		g_log << Logger::Info << "[cassandradbmanager] cassandra-max-concurrent-creations " << max_concurrent_creations << endl;
+//		g_log << Logger::Info << "[cassandradbmanager] cassandra-queue-size-io " << queue_size_io << " cassandra-queue-size-event " << queue_size_event << endl;
+//		g_log << Logger::Info << "[cassandradbmanager] cassandra-reconnect-wait-time " << reconnect_wait_time << " cassandra-concurrent-requests-threshold " << concurrent_requests_threshold << endl;
+//		g_log << Logger::Info << "[cassandradbmanager] cassandra-connect-timeout " << connect_timeout << " cassandra-request-timeout " << request_timeout << endl;
+//		g_log << Logger::Info << "[cassandradbmanager] cassandra-enable-load-balance-round-robin " << enable_load_balance_round_robin << " cassandra-enable-token-aware-routing " << enable_token_aware_routing << endl;
+//		g_log << Logger::Info << "[cassandradbmanager] cassandra-enable-latency-aware-routing " << enable_latency_aware_routing << endl;
+//		g_log << Logger::Info << "[cassandradbmanager] cassandra-enable-tcp-nodelay " << enable_tcp_nodelay << " cassandra-enable-tcp-keepalive " << enable_tcp_keepalive << endl;
 		cassandradbmanager::seed_nodes = seed_nodes;
 		cassandradbmanager::port = port;
 		cassandradbmanager::username = username;
@@ -114,15 +115,15 @@ public:
 		cassandradbmanager::enable_tcp_nodelay = enable_tcp_nodelay;
 		cassandradbmanager::enable_tcp_keepalive = enable_tcp_keepalive;
 		if(::arg().mustDo("query-logging")) {
-			L << Logger::Info << "[CassandraBackend] Connecting to cassandra cluster " << endl;
+			g_log << Logger::Info << "[CassandraBackend] Connecting to cassandra cluster " << endl;
 		}
 		cassandradbmanager::getInstance();
 		if(::arg().mustDo("query-logging")) {
-			L << Logger::Info << "[CassandraBackend] Connection to cassandra cluster successful " << endl;
+			g_log << Logger::Info << "[CassandraBackend] Connection to cassandra cluster successful " << endl;
 		}
 
 	 } catch (const ArgException &A) {
-		L << Logger::Error << "[CassandraBackend]" << " Fatal argument error: "<< A.reason << endl;
+		g_log << Logger::Error << "[CassandraBackend]" << " Fatal argument error: "<< A.reason << endl;
 		throw;
 	 } catch (...) {
 		throw;
@@ -138,7 +139,7 @@ public:
 			const char* query =
 					"SELECT domain FROM pdns.domain_id_domain_relation WHERE domain_id = ?";
 			if(::arg().mustDo("query-logging")) {
-				L << Logger::Info << "[CassandraBackend] SELECT domain FROM pdns.domain_id_domain_relation WHERE domain_id = " << domain_id << endl;
+				g_log << Logger::Info << "[CassandraBackend] SELECT domain FROM pdns.domain_id_domain_relation WHERE domain_id = " << domain_id << endl;
 			}
 			string param = sc1->executeAxfrQuery(query, domain_id);
 			if (param.size() > 0) {
@@ -149,21 +150,21 @@ public:
 				return false;
 			}
 		} catch (const std::exception &exc) {
-			L << Logger::Critical << "LIST exception " << exc.what() << endl;
+			g_log << Logger::Critical << "LIST exception " << exc.what() << endl;
 			throw PDNSException("LIST exception");
 		} catch (...) {
-			L << Logger::Critical << "Unknown exception in LIST" << endl;
+			g_log << Logger::Critical << "Unknown exception in LIST" << endl;
 			throw PDNSException("Unknown exception in LIST");
 		}
 		return false;
 	}
 
 
-  bool getSOA(const DNSName &name, SOAData &soadata, DNSPacket *p = 0) {
+  bool getSOA(const DNSName &name, SOAData &soadata) {
 		try {
 			domain = name.toStringNoDot();
 			if(::arg().mustDo("query-logging")) {
-			L << Logger::Info << "[CassandraBackend] Recieved getSOA " << domain << endl;
+			g_log << Logger::Info << "[CassandraBackend] Recieved getSOA " << domain << endl;
 			}
 			fetchdata();
 			vector<backendrecord>::const_iterator cii;
@@ -172,7 +173,7 @@ public:
 				backendrecord backendRecord = (*cii);//backendRecords[index];
 				if (backendRecord.getType() == QType::SOA) {
 					if(::arg().mustDo("query-logging")) {
-						L << Logger::Info << "[CassandraBackend] SOA record found" << endl;
+						g_log << Logger::Info << "[CassandraBackend] SOA record found" << endl;
 					}
 					soadata.db = this;
 					//Data format :: domain_id nameserver	hostname    serial refresh retry expiry default_ttl
@@ -187,10 +188,10 @@ public:
 							soadata.domain_id = (uint32_t) atoi(token.c_str());
 							break;
 						case 1:
-							soadata.nameserver = token.c_str();
+							soadata.nameserver = DNSName(token.c_str());
 							break;
 						case 2:
-							soadata.hostmaster = token.c_str();
+							soadata.hostmaster = DNSName(token.c_str());
 							break;
 						case 3:
 							soadata.serial = (uint32_t) atoi(token.c_str());
@@ -208,14 +209,14 @@ public:
 							soadata.default_ttl = (uint32_t) atoi(token.c_str());
 							break;
 						default:
-							L << Logger::Info << "[CassandraBackend]Extra params while parsing" << endl;
+							g_log << Logger::Info << "[CassandraBackend]Extra params while parsing" << endl;
 						}
 						soadata.ttl = backendRecord.getTtl();
-						soadata.qname = this->domain;
+						soadata.qname = DNSName(this->domain);
 						rec_index++;
 					}
 					if(::arg().mustDo("query-logging")) {
-						L << Logger::Info << "[CassandraBackend] SOA serial "
+						g_log << Logger::Info << "[CassandraBackend] SOA serial "
 							<< soadata.serial << " refresh " << soadata.refresh
 							<< " retry " << soadata.retry << " expire "
 							<< soadata.expire << " default_ttl "
@@ -231,10 +232,10 @@ public:
 			clear(false);
 			return false;
 		} catch (const std::exception &exc) {
-			L << Logger::Critical << "[CassandraBackend] SOA exception " << exc.what() << endl;
+			g_log << Logger::Critical << "[CassandraBackend] SOA exception " << exc.what() << endl;
 			throw PDNSException("SOA exception");
 		} catch (...) {
-			L << Logger::Critical << "[CassandraBackend] Unknown exception in SOA" << endl;
+			g_log << Logger::Critical << "[CassandraBackend] Unknown exception in SOA" << endl;
 			throw PDNSException("Unknown exception in SOA");
 		}
 		return false;
@@ -248,14 +249,14 @@ public:
 			recordIndex = 0;
 			totalSize = 0;
 			if(::arg().mustDo("query-logging")) {
-				L << Logger::Info << "[CassandraBackend] Recieved lookup query for " << queryType << " " << domain << " " << endl;
+				g_log << Logger::Info << "[CassandraBackend] Recieved lookup query for " << queryType << " " << domain << " " << endl;
 			}
 			fetchdata();
 		} catch (const std::exception &exc) {
-			L << Logger::Critical << "[CassandraBackend] lookup exception " << exc.what() << endl;
+			g_log << Logger::Critical << "[CassandraBackend] lookup exception " << exc.what() << endl;
 			throw PDNSException("lookup exception");
 		} catch (...) {
-			L << Logger::Critical << "[CassandraBackend] Unknown exception in lookup" << endl;
+			g_log << Logger::Critical << "[CassandraBackend] Unknown exception in lookup" << endl;
 			throw PDNSException("Unknown exception in lookup");
 		}
 	}
@@ -265,7 +266,7 @@ public:
 	  cassandradbmanager *sc1 = cassandradbmanager::getInstance();
 	  const char* query = "SELECT domain, recordmap, creation_time FROM pdns.domain_lookup_records WHERE domain = ?";
 	  if(::arg().mustDo("query-logging")) {
-		  L << Logger::Info << "[CassandraBackend] SELECT domain, recordmap, creation_time FROM pdns.domain_lookup_records WHERE domain = "<<domain<< endl;
+		  g_log << Logger::Info << "[CassandraBackend] SELECT domain, recordmap, creation_time FROM pdns.domain_lookup_records WHERE domain = "<<domain<< endl;
 	  }
 	  sc1->executeQuery(query,&record,domain.c_str(),"ANY");
 	  backendRecords = backendutil::parse(&record);
@@ -278,7 +279,7 @@ public:
 	  string query = "SELECT domain, recordmap, creation_time FROM pdns.domain_lookup_records WHERE domain in (";
 	  query.append(param);query.append(")");
 	  if(::arg().mustDo("query-logging")) {
-		  L << Logger::Info << "[CassandraBackend] "<<query<<endl;
+		  g_log << Logger::Info << "[CassandraBackend] "<<query<<endl;
 	  }
 	  sc1->executeQuery(query.c_str(),&record,"ANY");
 	  backendRecords = backendutil::parse(&record);
@@ -294,13 +295,13 @@ public:
 			}
 			backendrecord backendRecord = backendRecords[recordIndex];
 			if ((backendRecord.getType() != QType::SOA) && (backendRecord.getType().getName() == queryType || queryType == "ANY")) {
-				rr.qname = domain;
+				rr.qname = DNSName(domain);
 				rr.qtype = backendRecord.getType();
 				rr.ttl = backendRecord.getTtl();
 				rr.content = backendRecord.getRecord();
 			} else {
 				if(::arg().mustDo("query-logging")) {
-					L << Logger::Info << "[CassandraBackend] Record skipped, Type requested " << queryType << " Record type " << backendRecord.getType().getName() << endl;
+					g_log << Logger::Info << "[CassandraBackend] Record skipped, Type requested " << queryType << " Record type " << backendRecord.getType().getName() << endl;
 				}
 			}
 			if (recordIndex < this->totalSize) {
@@ -311,10 +312,10 @@ public:
 				return false;
 			}
 		} catch (const std::exception &exc) {
-			L << Logger::Critical << "[CassandraBackend] GET exception " << exc.what() << endl;
+			g_log << Logger::Critical << "[CassandraBackend] GET exception " << exc.what() << endl;
 			throw PDNSException("GET exception");
 		} catch (...) {
-			L << Logger::Critical << "[CassandraBackend] Unknown exception in GET" << endl;
+			g_log << Logger::Critical << "[CassandraBackend] Unknown exception in GET" << endl;
 			throw PDNSException("Unknown exception in GET");
 		}
 		return false;
@@ -375,7 +376,7 @@ public:
   CassandraBackendLoader()
   {
     BackendMakers().report(new CassandraBackendFactory);
-    L << Logger::Info << "[cassandrabackendbackend] This is the cassandrabackend backend version  1" << endl;
+    g_log << Logger::Info << "[cassandrabackendbackend] This is the cassandrabackend backend version  1" << endl;
   }
 };
 
